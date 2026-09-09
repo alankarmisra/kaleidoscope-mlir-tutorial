@@ -1,0 +1,27 @@
+# CMake and Ninja build output
+build/
+cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+build.ninja
+.ninja_deps
+.ninja_log
+
+# Compiled artifacts
+*.a
+*.dylib
+*.o
+*.so
+*.out
+
+# Editor and operating-system files
+.DS_Store
+.cache/
+*.swp
+
+# LLVM lit output
+test/Output/
+**/test/Output/
+**/test/.lit_test_times.txt
