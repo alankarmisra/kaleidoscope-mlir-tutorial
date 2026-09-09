@@ -3,7 +3,7 @@
 ## Chapter 2 Introduction
 
 Welcome to Chapter 2 of the "[Implementing a language with
-LLVM](chapter-00.md)" tutorial. This chapter shows you how to use the
+MLIR](chapter-00.md)" tutorial. This chapter shows you how to use the
 lexer, built in [Chapter 1](chapter-01.md), to build a full
 [parser](http://en.wikipedia.org/wiki/Parsing) for our Kaleidoscope
 language. Once we have a parser, we'll define and build an [Abstract
@@ -696,8 +696,7 @@ $
 
 There is a lot of room for extension here. You can define new AST nodes,
 extend the language in many ways, etc. In the [next
-installment](chapter-03.md), we will describe how to generate LLVM
-Intermediate Representation (IR) from the AST.
+installment](chapter-03.md), we will describe how to generate MLIR from the AST.
 
 ## Full Code Listing
 
@@ -712,8 +711,7 @@ clang++ -g -O3 toy.cpp
 
 Here is the code:
 
-```{literalinclude} ../../../examples/Kaleidoscope/Chapter2/toy.cpp
-:language: c++
+```cpp(../code/chapter-02/toy.cpp)
 ```
 
-[Next: Implementing Code Generation to LLVM IR](chapter-03.md)
+[Next: Implementing Code Generation to MLIR](chapter-03.md)
