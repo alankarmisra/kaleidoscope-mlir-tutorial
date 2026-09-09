@@ -3,7 +3,7 @@
 ## Chapter 7 Introduction
 
 Welcome to Chapter 7 of the "[Implementing a language with
-LLVM](index.md)" tutorial. In chapters 1 through 6, we've built a
+LLVM](chapter-00.md)" tutorial. In chapters 1 through 6, we've built a
 very respectable, albeit simple, [functional programming
 language](http://en.wikipedia.org/wiki/Functional_programming). In our
 journey, we learned some parsing techniques, how to build and represent
@@ -95,7 +95,7 @@ direct accesses to G and H: they are not renamed or versioned. This
 differs from some other compiler systems, which do try to version memory
 objects. In LLVM, instead of encoding dataflow analysis of memory into
 the LLVM IR, it is handled with [Analysis
-Passes](../../WritingAnLLVMPass.md) which are computed on demand.
+Passes](https://llvm.org/docs/WritingAnLLVMPass.html) which are computed on demand.
 
 With this in mind, the high-level idea is that we want to make a stack
 variable (which lives in memory, because it is on the stack) for each
@@ -110,7 +110,7 @@ that @G defines *space* for an i32 in the global data area, but its
 *name* actually refers to the address for that space. Stack variables
 work the same way, except that instead of being declared with global
 variable definitions, they are declared with the [LLVM alloca
-instruction](../../LangRef.md#alloca-instruction):
+instruction](https://llvm.org/docs/LangRef.html#alloca-instruction):
 
 ```llvm
 define i32 @example() {
@@ -213,7 +213,7 @@ variables in certain circumstances:
    funny pointer arithmetic is involved, the alloca will not be
    promoted.
 4. mem2reg only works on allocas of [first
-   class](../../LangRef.md#first-class-types) values (such as pointers,
+   class](https://llvm.org/docs/LangRef.html#first-class-types) values (such as pointers,
    scalars and vectors), and only if the array size of the allocation is
    1 (or missing in the .ll file). mem2reg is not capable of promoting
    structs or arrays to registers. Note that the "sroa" pass is
@@ -239,7 +239,7 @@ is:
   variables that only have one assignment point, good heuristics to
   avoid insertion of unneeded phi nodes, etc.
 - Needed for debug info generation: [Debug information in
-  LLVM](../../SourceLevelDebugging.md) relies on having the address of
+  LLVM](https://llvm.org/docs/SourceLevelDebugging.html) relies on having the address of
   the variable exposed so that debug info can be attached to it. This
   technique dovetails very naturally with this style of debug info.
 
@@ -390,7 +390,7 @@ Builder->CreateStore(NextVar, Alloca);
 ```
 
 This code is virtually identical to the code [before we allowed mutable
-variables](LangImpl05.md#code-generation-for-the-for-loop). The big difference is that we
+variables](chapter-05.md#code-generation-for-the-for-loop). The big difference is that we
 no longer have to construct a PHI node, and we use load/store to access
 the variable as needed.
 
@@ -870,4 +870,4 @@ Here is the code:
 :language: c++
 ```
 
-[Next: Compiling to Object Code](LangImpl08.md)
+[Next: Compiling to Object Code](chapter-08.md)

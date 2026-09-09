@@ -3,7 +3,7 @@
 ## Chapter 4 Introduction
 
 Welcome to Chapter 4 of the "[Implementing a language with
-LLVM](index.md)" tutorial. Chapters 1-3 described the implementation
+LLVM](chapter-00.md)" tutorial. Chapters 1-3 described the implementation
 of a simple language and added support for generating LLVM IR. This
 chapter describes two new techniques: adding optimizer support to your
 language, and adding JIT compiler support. These additions will
@@ -99,8 +99,8 @@ but if run at link time, this can be a substantial portion of the whole
 program). It also supports and includes "per-function" passes which just
 operate on a single function at a time, without looking at other
 functions. For more information on passes and how they are run, see the
-[How to Write a Pass](../../WritingAnLLVMPass.md) document and the
-[List of LLVM Passes](../../Passes.md).
+[How to Write a Pass](https://llvm.org/docs/WritingAnLLVMPass.html) document and the
+[List of LLVM Passes](https://llvm.org/docs/Passes.html).
 
 For Kaleidoscope, we are currently generating functions on the fly, one
 at a time, as the user types them in. We aren't shooting for the
@@ -118,7 +118,7 @@ a transform pass, all analysis passes it depends upon must be registered in
 advance.
 
 In order to get per-function optimizations going, we need to set up a
-[FunctionPassManager](../../WritingAnLLVMPass.md#what-passmanager-does) to hold
+[FunctionPassManager](https://llvm.org/docs/WritingAnLLVMPass.html#what-passmanager-does) to hold
 and organize the LLVM optimizations that we want to run. Once we have
 that, we can add a set of optimizations to run. We'll need a new
 FunctionPassManager for each module that we want to optimize, so we'll
@@ -228,7 +228,7 @@ point add instruction from every execution of this function.
 
 LLVM provides a wide variety of optimizations that can be used in
 certain circumstances. Some [documentation about the various
-passes](../../Passes.md) is available, but it isn't very complete.
+passes](https://llvm.org/docs/Passes.html) is available, but it isn't very complete.
 Another good source of ideas can come from looking at the passes that
 `Clang` runs to get started. The "`opt`" tool allows you to
 experiment with passes from the command line, so you can see if they do
@@ -655,7 +655,7 @@ This completes the JIT and optimizer chapter of the Kaleidoscope
 tutorial. At this point, we can compile a non-Turing-complete
 programming language, optimize and JIT compile it in a user-driven way.
 Next up we'll look into [extending the language with control flow
-constructs](LangImpl05.md), tackling some interesting LLVM IR issues
+constructs](chapter-05.md), tackling some interesting LLVM IR issues
 along the way.
 
 ## Full Code Listing
@@ -680,4 +680,4 @@ Here is the code:
 :language: c++
 ```
 
-[Next: Extending the language: control flow](LangImpl05.md)
+[Next: Extending the language: control flow](chapter-05.md)

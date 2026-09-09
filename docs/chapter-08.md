@@ -2,7 +2,7 @@
 
 ## Chapter 8 Introduction
 
-Welcome to Chapter 8 of the "[Implementing a language with LLVM](index.md)" tutorial. This chapter describes how to compile our
+Welcome to Chapter 8 of the "[Implementing a language with LLVM](chapter-00.md)" tutorial. This chapter describes how to compile our
 language down to object files.
 
 ## Choosing a target
@@ -110,7 +110,7 @@ auto TargetMachine = Target->createTargetMachine(TargetTriple, CPU, Features, op
 
 We're now ready to configure our module, to specify the target and
 data layout. This isn't strictly necessary, but the [frontend
-performance guide](../../Frontend/PerformanceTips.md) recommends
+performance guide](https://llvm.org/docs/Frontend/PerformanceTips.html) recommends
 this. Optimizations benefit from knowing about the target and data
 layout.
 
@@ -200,4 +200,4 @@ average of 3.0 and 4.0: 3.5
 :language: c++
 ```
 
-[Next: Adding Debug Information](LangImpl09.md)
+[Next: Adding Debug Information](chapter-09.md)
