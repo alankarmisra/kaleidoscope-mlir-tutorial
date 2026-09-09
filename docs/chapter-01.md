@@ -17,7 +17,7 @@ require type declarations. This gives the language a very nice and
 simple syntax. For example, the following simple example computes
 [Fibonacci numbers:](http://en.wikipedia.org/wiki/Fibonacci_number)
 
-```
+```kaleidoscope
 # Compute the x'th fibonacci number.
 def fib(x)
   if x < 3 then
@@ -30,11 +30,11 @@ fib(40)
 ```
 
 We also allow Kaleidoscope to call into standard library functions - the
-LLVM JIT makes this really easy. This means that you can use the
+MLIR's integration with the LLVM JIT makes this really easy. This means that you can use the
 'extern' keyword to define a function before you use it (this is also
 useful for mutually recursive functions). For example:
 
-```
+```kaleidoscope
 extern sin(arg);
 extern cos(arg);
 extern atan2(arg1 arg2);
@@ -70,7 +70,7 @@ enum Token {
 
   // primary
   tok_identifier = -4,
-  tok_number = -5,
+  tok_number = -5
 };
 
 static std::string IdentifierStr; // Filled in if tok_identifier
@@ -135,7 +135,7 @@ if (isdigit(LastChar) || LastChar == '.') {   // Number: [0-9.]+
     LastChar = getchar();
   } while (isdigit(LastChar) || LastChar == '.');
 
-  NumVal = strtod(NumStr.c_str(), 0);
+  NumVal = strtod(NumStr.c_str(), nullptr);
   return tok_number;
 }
 ```
