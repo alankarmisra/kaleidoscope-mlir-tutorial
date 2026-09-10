@@ -1,9 +1,8 @@
-# Kaleidoscope: Conclusion and other useful LLVM tidbits
+# 10. Kaleidoscope: Conclusion and other useful LLVM tidbits
 
 ## Tutorial Conclusion
 
-Welcome to the final chapter of the "[Implementing a language with
-LLVM](chapter-00.md)" tutorial. In the course of this tutorial, we have
+Welcome to the final chapter of the "[Implementing a language with MLIR](chapter-00.md)" tutorial. In the course of this tutorial, we have
 grown our little Kaleidoscope language from being a useless toy, to
 being a semi-interesting (but probably still useless) toy. :)
 

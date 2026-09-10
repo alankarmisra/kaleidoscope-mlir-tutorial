@@ -1,4 +1,4 @@
-# Kaleidoscope: Kaleidoscope Introduction and the Lexer
+# 1. Kaleidoscope: Kaleidoscope Introduction and the Lexer
 
 ## The Kaleidoscope Language
 

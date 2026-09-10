@@ -13,6 +13,9 @@ find_package(MLIR REQUIRED CONFIG
 
 add_executable(toy toy.cpp)
 
+# Make symbols in the executable available to the JIT for runtime lookup.
+set_target_properties(toy PROPERTIES ENABLE_EXPORTS ON)
+
 target_include_directories(toy PRIVATE
   ${LLVM_INCLUDE_DIRS}
   ${MLIR_INCLUDE_DIRS}

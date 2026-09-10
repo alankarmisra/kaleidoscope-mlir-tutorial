@@ -1,9 +1,8 @@
-# Kaleidoscope: Extending the Language: Control Flow
+# 5. Kaleidoscope: Extending the Language: Control Flow
 
 ## Chapter 5 Introduction
 
-Welcome to Chapter 5 of the "[Implementing a language with
-LLVM](chapter-00.md)" tutorial. Parts 1-4 described the implementation of
+Welcome to Chapter 5 of the "[Implementing a language with MLIR](chapter-00.md)" tutorial. Parts 1-4 described the implementation of
 the simple Kaleidoscope language and included support for generating
 LLVM IR, followed by optimizations and a JIT compiler. Unfortunately, as
 presented, Kaleidoscope is mostly useless: it has no control flow other

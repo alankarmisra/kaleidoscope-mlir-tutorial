@@ -1,9 +1,8 @@
-# Kaleidoscope: Extending the Language: Mutable Variables
+# 7. Kaleidoscope: Extending the Language: Mutable Variables
 
 ## Chapter 7 Introduction
 
-Welcome to Chapter 7 of the "[Implementing a language with
-LLVM](chapter-00.md)" tutorial. In chapters 1 through 6, we've built a
+Welcome to Chapter 7 of the "[Implementing a language with MLIR](chapter-00.md)" tutorial. In chapters 1 through 6, we've built a
 very respectable, albeit simple, [functional programming
 language](http://en.wikipedia.org/wiki/Functional_programming). In our
 journey, we learned some parsing techniques, how to build and represent

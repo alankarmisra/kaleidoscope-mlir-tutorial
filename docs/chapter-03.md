@@ -1,4 +1,4 @@
-# Kaleidoscope: Code generation to MLIR
+# 3. Kaleidoscope: Code generation to MLIR
 
 ## Chapter 3 Introduction
 

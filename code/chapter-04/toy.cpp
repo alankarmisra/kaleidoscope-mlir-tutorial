@@ -410,7 +410,7 @@ static std::unique_ptr<PrototypeAST> ParseExtern() {
 static std::unique_ptr<MLIRContext> TheContext;
 static OwningOpRef<ModuleOp> TheModule;
 static std::unique_ptr<OpBuilder> TheBuilder;
-static std::unique_ptr<PassManager> TheFPM;
+static std::unique_ptr<PassManager> ThePM;
 static std::map<std::string, Value> NamedValues;
 static std::unique_ptr<llvm::orc::KaleidoscopeJIT> TheJIT;
 static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos;
@@ -544,7 +544,7 @@ func::FuncOp FunctionAST::codegen() {
     // Validate the generated code, checking for consistency.
     if (succeeded(verify(TheFunction))) {
       // Run the optimizer on the module.
-      if (failed(TheFPM->run(*TheModule))) {
+      if (failed(ThePM->run(*TheModule))) {
         LogError("Could not optimize function.");
         TheFunction.erase();
         return {};
@@ -564,7 +564,7 @@ func::FuncOp FunctionAST::codegen() {
 
 static void InitializeModuleAndManagers() {
   // Destroy objects that refer to the old context before replacing it.
-  TheFPM.reset();
+  ThePM.reset();
   TheBuilder.reset();
   TheModule = OwningOpRef<ModuleOp>();
   TheContext.reset();
@@ -578,23 +578,30 @@ static void InitializeModuleAndManagers() {
   TheBuilder = std::make_unique<OpBuilder>(TheContext.get());
 
   // Create a pass manager and add a couple of simple optimizations.
-  TheFPM = std::make_unique<PassManager>(TheContext.get());
-  TheFPM->addNestedPass<func::FuncOp>(createCanonicalizerPass());
-  TheFPM->addNestedPass<func::FuncOp>(createCSEPass());
+  ThePM = std::make_unique<PassManager>(TheContext.get());
+  ThePM->addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  ThePM->addNestedPass<func::FuncOp>(createCSEPass());
 }
 
 static llvm::Expected<llvm::orc::ThreadSafeModule> lowerToLLVM() {
+  // Lower the high-level MLIR operations to the LLVM dialect.
   PassManager LoweringPM(TheContext.get());
   LoweringPM.addPass(createConvertFuncToLLVMPass());
   LoweringPM.addPass(createArithToLLVMConversionPass());
+
+  // Clean up any temporary casts introduced by dialect conversion.
   LoweringPM.addPass(createReconcileUnrealizedCastsPass());
   if (failed(LoweringPM.run(*TheModule)))
     return llvm::make_error<llvm::StringError>(
         "could not lower module to the LLVM dialect",
         llvm::inconvertibleErrorCode());
 
+  // Register the translations from MLIR's LLVM dialect to LLVM IR.
   registerBuiltinDialectTranslation(*TheContext);
   registerLLVMDialectTranslation(*TheContext);
+
+  // Translate the lowered MLIR module into an LLVM IR module. The LLVM
+  // context is kept with the module because the JIT may compile it later.
   auto LLVMContext = std::make_unique<llvm::LLVMContext>();
   auto LLVMModule = translateModuleToLLVMIR(*TheModule, *LLVMContext);
   if (!LLVMModule)
@@ -602,7 +609,10 @@ static llvm::Expected<llvm::orc::ThreadSafeModule> lowerToLLVM() {
         "could not translate the LLVM dialect to LLVM IR",
         llvm::inconvertibleErrorCode());
 
+  // Match the module's data layout to the target selected by the JIT.
   LLVMModule->setDataLayout(TheJIT->getDataLayout());
+
+  // ThreadSafeModule transfers ownership of both objects to the ORC JIT.
   return llvm::orc::ThreadSafeModule(std::move(LLVMModule),
                                      std::move(LLVMContext));
 }
@@ -662,14 +672,20 @@ static void HandleTopLevelExpression() {
 // "Library" functions that can be "extern'd" from user code.
 //===----------------------------------------------------------------------===//
 
+#ifdef _WIN32
+#define DLLEXPORT __declspec(dllexport)
+#else
+#define DLLEXPORT
+#endif
+
 /// putchard - putchar that takes a double and returns 0.
-extern "C" double putchard(double X) {
+extern "C" DLLEXPORT double putchard(double X) {
   fputc((char)X, stderr);
   return 0;
 }
 
 /// printd - printf that takes a double, prints it as "%f\n", and returns 0.
-extern "C" double printd(double X) {
+extern "C" DLLEXPORT double printd(double X) {
   fprintf(stderr, "%f\n", X);
   return 0;
 }

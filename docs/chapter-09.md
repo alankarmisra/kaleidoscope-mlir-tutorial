@@ -1,9 +1,8 @@
-# Kaleidoscope: Adding Debug Information
+# 9. Kaleidoscope: Adding Debug Information
 
 ## Chapter 9 Introduction
 
-Welcome to Chapter 9 of the "[Implementing a language with
-LLVM](chapter-00.md)" tutorial. In chapters 1 through 8, we've built a
+Welcome to Chapter 9 of the "[Implementing a language with MLIR](chapter-00.md)" tutorial. In chapters 1 through 8, we've built a
 decent little programming language with functions and variables.
 What happens if something goes wrong though, how do you debug your
 program?
