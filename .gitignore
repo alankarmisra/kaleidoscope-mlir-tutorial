@@ -15,11 +15,15 @@ build.ninja
 *.o
 *.so
 *.out
+**/toy
+*.dSYM/
 
 # Editor and operating-system files
 .DS_Store
 .cache/
 *.swp
+.vscode/c_cpp_properties.json
+docs/llvm-compatibility.md
 
 # LLVM lit output
 test/Output/

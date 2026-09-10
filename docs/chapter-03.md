@@ -234,10 +234,6 @@ the module. A `func.func` operation is also an MLIR
 [symbol](https://mlir.llvm.org/docs/SymbolsAndSymbolTables/), so its name
 is registered in `TheModule`'s symbol table when it is inserted.
 
-By default, MLIR functions are public. A function declaration may be
-defined outside the current module, and a function definition may be
-called from outside the module.
-
 At this point we have a function prototype with no body. This is how `func.func`
 represents function declarations. For extern statements in Kaleidoscope, this
 is as far as we need to go. For function definitions however, we need to
@@ -318,6 +314,32 @@ we handle this by merely deleting the function we produced with the
 that they incorrectly typed in before: if we didn't delete it, it would
 live in the symbol table, with a body, preventing future redefinition.
 
+## Private declarations
+
+```cpp
+static void HandleExtern() {
+  if (auto ProtoAST = ParseExtern()) {
+    if (auto FnIR = ProtoAST->codegen()) {
+      // Function declarations need to be private
+      FnIR.setPrivate();
+      fprintf(stderr, "Read extern:\n");
+      ...
+    }
+  } else {
+    // Skip token for error recovery.
+    getNextToken();
+  }
+}
+```
+
+MLIR allows function definitions with bodies to have public visibility,
+making their symbols available outside the module. Function declarations
+have no body and represent functions supplied externally, so the `func`
+dialect requires them to have private symbol visibility. This allows
+operations within the module to reference a declaration such as `cos`
+without treating it as a definition exported by the module. The actual
+`cos` function is resolved later by the JIT or linker.
+
 ## Driver Changes and Closing Thoughts
 
 For now, code generation to MLIR doesn't really get us much, except that
@@ -381,7 +403,7 @@ control flow to actually make recursion useful :).
 ```mlir
 ready> extern cos(x);
 Read extern:
-func.func @cos(f64) -> f64
+func.func private @cos(f64) -> f64
 
 ready> cos(1.234);
 Read top-level expression:
@@ -415,7 +437,7 @@ module {
     %2 = arith.addf %0, %1 : f64
     return %2 : f64
   }
-  func.func @cos(f64) -> f64
+  func.func private @cos(f64) -> f64
 }
 ```
 
@@ -477,7 +499,7 @@ cmake --build build
 
 Here is the code:
 
-```cpp(../code/chapter-03/toy.cpp) 
+```cpp(../code/chapter-03/toy.cpp)
 ```
 
 [Next: Adding JIT and Optimizer Support](chapter-04.md)

@@ -676,8 +676,7 @@ properly at runtime.
 
 Here is the code:
 
-```{literalinclude} ../../../examples/Kaleidoscope/Chapter4/toy.cpp
-:language: c++
+```cpp(../code/chapter-04/toy.cpp) 
 ```
 
 [Next: Extending the language: control flow](chapter-05.md)
