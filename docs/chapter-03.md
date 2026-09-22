@@ -333,14 +333,39 @@ definition's own prototype. This means that an earlier `extern`
 declaration takes precedence over the function definition's signature.
 Because all Kaleidoscope values currently have type `f64`, the relevant
 difference is the number of arguments. There are a number of ways to fix
-this bug; see what you can come up with! Here is a testcase:
+this bug; see what you can come up with! Here is a testcase (the `--dump-mlir` option is explained in a bit):
 
-```kaleidoscope
-extern foo(a);
-def foo(a b) a;
+<!-- code-merge:start -->
+```bash
+$ build/toy --dump-mlir
 ```
+```kaleidoscope
+ready> extern foo(a);
+```
+```text
+Read extern:
+```
+```mlir
+func.func private @foo(f64) -> f64
+```
+```kaleidoscope
+ready> def foo(a b) a;
+```
+```text
+Read function definition:
+```
+```mlir
+func.func private @foo(%arg0: f64) -> f64 {
+  return %arg0 : f64
+}
+```
+<!-- code-merge:end -->
 
-The MLIR verifier will not catch the first example because the IR we ultimately construct is internally valid—it simply represents the wrong one-argument function.
+The MLIR verifier cannot catch this because both prototypes are parsed, but
+`FunctionAST::codegen()` finds the existing one-argument `@foo` created by the
+`extern` and reuses it without checking it against the two-argument definition.
+The resulting module therefore contains one internally valid function—but it
+is the wrong one-argument function.
 
 ## Private declarations
 
@@ -409,10 +434,6 @@ if (DumpMLIR) {
   llvm::errs() << '\n';
 }
 ```
-
-At this point, the compiler produces only high-level MLIR. We will add
-lowering to LLVM IR in the next chapter when we introduce the JIT.
-
 
 ## Driver Changes and Closing Thoughts
 
@@ -542,27 +563,7 @@ instructions.
 
 We use the following `CMakeLists.txt` to build the example:
 
-```cmake
-cmake_minimum_required(VERSION 3.20)
-project(KaleidoscopeMLIR LANGUAGES C CXX)
-
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED YES)
-
-find_package(MLIR REQUIRED CONFIG)
-
-message(STATUS "Using MLIRConfig.cmake in: ${MLIR_DIR}")
-
-include_directories(${LLVM_INCLUDE_DIRS})
-include_directories(${MLIR_INCLUDE_DIRS})
-add_definitions(${LLVM_DEFINITIONS})
-
-add_executable(toy toy.cpp)
-
-target_link_libraries(toy PRIVATE
-  MLIRArithDialect
-  MLIRFuncDialect
-)
+```cmake(../code/chapter-03/CmakeLists.txt)
 ```
 
 Configure the example by setting `MLIR_DIR` to the directory containing

@@ -744,7 +744,12 @@ can add variable mutation without building SSA in your front-end.
 ## Full Code Listing
 
 Here is the complete code listing for our running example, enhanced with
-the support for user-defined operators. To build this example, use:
+the support for user-defined operators. Here is the CMake configuration:
+
+```cmake(../code/chapter-06/CMakeLists.txt)
+```
+
+To build this example, use:
 
 ```bash
 cmake -S . -B build \

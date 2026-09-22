@@ -6,10 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED YES)
 set(CMAKE_CXX_EXTENSIONS NO)
 
-find_package(MLIR REQUIRED CONFIG
-  PATHS "/Users/alankar/Documents/opensource/llvm-project/build/lib/cmake/mlir"
-  NO_DEFAULT_PATH
-)
+find_package(MLIR REQUIRED CONFIG)
 
 get_filename_component(KALEIDOSCOPE_LLVM_BUILD_DIR
   "${MLIR_DIR}/../../.." ABSOLUTE)

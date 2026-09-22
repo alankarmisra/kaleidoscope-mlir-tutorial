@@ -568,7 +568,6 @@ static std::unique_ptr<PrototypeAST> ParsePrototype() {
   if (CurTok != '(')
     return LogErrorP("Expected '(' in prototype");
 
-  // Read the list of argument names.
   std::vector<std::string> ArgNames;
   while (getNextToken() == tok_identifier)
     ArgNames.push_back(IdentifierStr);
@@ -672,27 +671,45 @@ and the parser will know you are done.
 
 ## Conclusions
 
-With just under 400 lines of commented code (240 lines of non-comment,
-non-blank code), we fully defined our minimal language, including a
-lexer, parser, and AST builder. With this done, the executable will
-validate Kaleidoscope code and tell us if it is grammatically invalid.
-For example, here is a sample interaction:
+With a relatively small amount of commented code, we have defined our minimal language, including a lexer, parser, and AST builder. The resulting executable validates Kaleidoscope code and reports whether it is grammatically valid. For example, here is a sample interaction:
 
+<!-- code-merge:start -->
 ```bash
-$ ./a.out
+$ ./build/toy
+```
+```kaleidoscope
 ready> def foo(x y) x+foo(y, 4.0);
-Parsed a function definition.
+```
+```text
+ready> Parsed a function definition.
+```
+```kaleidoscope
 ready> def foo(x y) x+y y;
-Parsed a function definition.
-Parsed a top-level expr
+```
+```text
+ready> Parsed a function definition.
+ready> Parsed a top-level expr
+```
+```kaleidoscope
 ready> def foo(x y) x+y );
-Parsed a function definition.
-Error: unknown token when expecting an expression
+```
+```text
+ready> Parsed a function definition.
+ready> Error: unknown token when expecting an expression
+```
+```kaleidoscope
 ready> extern sin(a);
+```
+```text
 ready> Parsed an extern
+```
+```kaleidoscope
 ready> ^D
+```
+```text
 $
 ```
+<!-- code-merge:end -->
 
 There is a lot of room for extension here. You can define new AST nodes,
 extend the language in many ways, etc. In the [next
@@ -700,13 +717,17 @@ installment](chapter-03.md), we will describe how to generate MLIR from the AST.
 
 ## Full Code Listing
 
-Here is the complete code listing for our running example.
+We use the following `CMakeLists.txt` to build the example:
+
+```cmake(../code/chapter-02/CmakeLists.txt)
+```
+
+Build it with:
 
 ```bash
-# Compile
-clang++ -g -O3 toy.cpp
-# Run
-./a.out
+cmake -S . -B build
+cmake --build build
+./build/toy
 ```
 
 Here is the code:

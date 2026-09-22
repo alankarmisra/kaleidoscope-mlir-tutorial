@@ -369,6 +369,9 @@ The complete implementation is split across:
 generated operation classes to the compiler; and
 - `CMakeLists.txt`, running TableGen and building the executable.
 
+```cmake(../code/chapter-10/CMakeLists.txt)
+```
+
 Use the chapter's build script as before:
 
 ```bash

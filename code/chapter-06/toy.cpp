@@ -63,7 +63,7 @@ enum Token {
   tok_unary = -12
 };
 
-static std::string IdentifierStr; // Filled in if tok_identifier
+static std::string IdentifierStr; // Filled in for identifiers and keywords
 static double NumVal;             // Filled in if tok_number
 
 /// gettok - Return the next token from standard input.

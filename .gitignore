@@ -24,6 +24,7 @@ build.ninja
 *.swp
 .vscode/c_cpp_properties.json
 docs/llvm-compatibility.md
+TODO.md
 
 # Local Claude files and directories
 **/*[cC][lL][aA][uU][dD][eE]*

@@ -153,18 +153,24 @@ dest.flush();
 
 ## Putting It All Together
 
-Does it work? Let's give it a try. We need to compile our code, but
-note that the arguments to `llvm-config` are different to the previous chapters.
+Does it work? Let's give it a try. Here is the CMake configuration:
 
+```cmake(../code/chapter-08/CMakeLists.txt)
 ```
-$ clang++ -g -O3 toy.cpp `llvm-config --cxxflags --ldflags --system-libs --libs all` -o toy
+
+Configure and build it in the same way as the previous chapters:
+
+```bash
+$ cmake -S . -B build \
+    -DMLIR_DIR=/path/to/llvm-project/build/lib/cmake/mlir
+$ cmake --build build
 ```
 
 Let's run it, and define a simple `average` function. Press Ctrl-D
 when you're done.
 
 ```
-$ ./toy
+$ ./build/toy
 ready> def average(x y) (x + y) * 0.5;
 ^D
 Wrote output.o

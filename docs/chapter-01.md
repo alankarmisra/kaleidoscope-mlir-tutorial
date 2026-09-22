@@ -73,7 +73,7 @@ enum Token {
   tok_number = -5
 };
 
-static std::string IdentifierStr; // Filled in if tok_identifier
+static std::string IdentifierStr; // Filled in for identifiers and keywords
 static double NumVal;             // Filled in if tok_number
 ```
 

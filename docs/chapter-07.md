@@ -855,13 +855,18 @@ dominance frontier" computation anywhere in sight.
 ## Full Code Listing
 
 Here is the complete code listing for our running example, enhanced with
-mutable variables and var/in support. To build this example, use:
+mutable variables and var/in support. Here is the CMake configuration:
+
+```cmake(../code/chapter-07/CMakeLists.txt)
+```
+
+To build this example, use:
 
 ```bash
-# Compile
-clang++ -g toy.cpp `llvm-config --cxxflags --ldflags --system-libs --libs core orcjit native` -O3 -o toy
-# Run
-./toy
+cmake -S . -B build \
+  -DMLIR_DIR=/path/to/llvm-project/build/lib/cmake/mlir
+cmake --build build
+./build/toy
 ```
 
 Here is the code:

@@ -16,7 +16,7 @@ Unfortunately, it does not produce wonderful code.
 
 <!-- code-merge:start -->
 ```bash
-$ build/toy --dump-mlir
+$ ../chapter-03/build/toy --dump-mlir
 ```
 ```mlir
 ready> def squareSumUnoptimized(x) (1+2+x)*(x+(1+2));
@@ -191,7 +191,13 @@ int main() {
 }
 ```
 
-The KaleidoscopeJIT class is a simple JIT built specifically for these tutorials, available inside the LLVM source code at [llvm-src/examples/Kaleidoscope/include/KaleidoscopeJIT.h](https://github.com/llvm/llvm-project/blob/main/llvm/examples/Kaleidoscope/include/KaleidoscopeJIT.h). In later chapters we will look at how it works and extend it with new features, but for now we will take it as given. Its API is very simple: `addModule` adds an LLVM IR module to the JIT, making its functions available for execution (with its memory managed by a `ResourceTracker`); and `lookup` allows us to look up pointers to the compiled code.
+The KaleidoscopeJIT class is a simple JIT included with this tutorial in
+[`code/include/KaleidoscopeJIT.h`](../code/include/KaleidoscopeJIT.h). In later
+chapters we will look at how it works and extend it with new features, but for
+now we will take it as given. Its API is very simple: `addModule` adds an LLVM
+IR module to the JIT, making its functions available for execution (with its
+memory managed by a `ResourceTracker`); and `lookup` allows us to look up
+pointers to the compiled code.
 
 The KaleidoscopeJIT accepts LLVM IR modules, not MLIR modules, so before
 we can add a module to the JIT we need to lower it. This happens in two
@@ -236,11 +242,44 @@ static llvm::Expected<llvm::orc::ThreadSafeModule> lowerToLLVM() {
   // Match the module's data layout to the target selected by the JIT.
   LLVMModule->setDataLayout(TheJIT->getDataLayout());
 
+  if (DumpLLVMIR) {
+    LLVMModule->print(llvm::errs(), nullptr);
+    llvm::errs() << '\n';
+  }
+
   // ThreadSafeModule transfers ownership of both objects to the ORC JIT.
   return llvm::orc::ThreadSafeModule(std::move(LLVMModule),
                                      std::move(LLVMContext));
 }
 ```
+
+## The `--dump-llvm-ir` Option
+
+Just as `--dump-mlir` lets us inspect the MLIR produced by the front-end,
+`--dump-llvm-ir` lets us inspect the LLVM IR produced by `lowerToLLVM()` before
+it is handed to the JIT. The option is defined using LLVM's command-line
+support:
+
+```cpp
+static llvm::cl::opt<bool> DumpLLVMIR(
+    "dump-llvm-ir", llvm::cl::desc("Print translated LLVM IR"),
+    llvm::cl::init(false));
+```
+
+After translating the module and setting its data layout, `lowerToLLVM()`
+checks the option and prints the LLVM IR when requested:
+
+```cpp
+if (DumpLLVMIR) {
+  LLVMModule->print(llvm::errs(), nullptr);
+  llvm::errs() << '\n';
+}
+```
+
+This is useful for seeing the final representation consumed by the ORC JIT and
+for diagnosing problems that occur after MLIR lowering.
+
+## Evaluating Top-Level Expressions
 
 We can now change our code that parses top-level expressions to look like this:
 
@@ -310,10 +349,26 @@ added.
 
 With just these changes, let's see how Kaleidoscope works now!
 
-```text
+<!-- code-merge:start -->
+```bash
+$ build/toy --dump-mlir
+```
+```kaleidoscope
 ready> 4+5;
+```
+```text
+Read top-level expression:
+```
+```mlir
+func.func @__anon_expr() -> f64 {
+  %cst = arith.constant 9.000000e+00 : f64
+  return %cst : f64
+}
+```
+```text
 Evaluated to 9.000000
 ```
+<!-- code-merge:end -->
 
 Well this looks like it is basically working. This demonstrates very
 basic functionality, but can we do more?
@@ -491,34 +546,26 @@ It works!
 Even with this simple code, we get some surprisingly powerful capabilities -
 check this out:
 
-```mlir
+<!-- code-merge:start -->
+```bash
+$ build/toy
+```
+```kaleidoscope
 ready> extern sin(x);
-Read extern:
-func.func private @sin(f64) -> f64
-
 ready> extern cos(x);
-Read extern:
-func.func private @cos(f64) -> f64
-
 ready> sin(1.0);
+```
+```text
 Evaluated to 0.841471
-
+```
+```kaleidoscope
 ready> def pythagoreanIdentity(x) sin(x)*sin(x) + cos(x)*cos(x);
-Read function definition:
-func.func @pythagoreanIdentity(%arg0: f64) -> f64 {
-  %0 = call @sin(%arg0) : (f64) -> f64
-  %1 = call @sin(%arg0) : (f64) -> f64
-  %2 = arith.mulf %0, %1 : f64
-  %3 = call @cos(%arg0) : (f64) -> f64
-  %4 = call @cos(%arg0) : (f64) -> f64
-  %5 = arith.mulf %3, %4 : f64
-  %6 = arith.addf %2, %5 : f64
-  return %6 : f64
-}
-
 ready> pythagoreanIdentity(4.0);
+```
+```text
 Evaluated to 1.000000
 ```
+<!-- code-merge:end -->
 
 Whoa, how does the JIT know about sin and cos? The answer is surprisingly
 simple: The KaleidoscopeJIT has a straightforward symbol resolution rule that
@@ -570,52 +617,9 @@ along the way.
 
 ## Full Code Listing
 
-Here is the complete code listing for our running example, enhanced with
-the JIT and optimizer. Because this chapter uses both MLIR and LLVM
-libraries, we use CMake to configure and build it:
+We use the following `CMakeLists.txt` to build the example:
 
-```cmake
-cmake_minimum_required(VERSION 3.20)
-
-project(kaleidoscope-chapter-04 LANGUAGES C CXX)
-
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED YES)
-set(CMAKE_CXX_EXTENSIONS NO)
-
-find_package(MLIR REQUIRED CONFIG)
-
-add_executable(toy toy.cpp)
-
-# Make symbols in the executable available to the JIT for runtime lookup.
-set_target_properties(toy PROPERTIES ENABLE_EXPORTS ON)
-
-target_include_directories(toy PRIVATE
-  ${LLVM_INCLUDE_DIRS}
-  ${MLIR_INCLUDE_DIRS}
-)
-
-target_compile_definitions(toy PRIVATE ${LLVM_DEFINITIONS})
-
-llvm_map_components_to_libnames(LLVM_LIBS
-  Core
-  OrcJIT
-  native
-)
-
-target_link_libraries(toy PRIVATE
-  MLIRArithToLLVM
-  MLIRArithDialect
-  MLIRBuiltinToLLVMIRTranslation
-  MLIRFuncToLLVM
-  MLIRFuncDialect
-  MLIRLLVMDialect
-  MLIRLLVMToLLVMIRTranslation
-  MLIRReconcileUnrealizedCasts
-  MLIRTargetLLVMIRExport
-  MLIRTransforms
-  ${LLVM_LIBS}
-)
+```cmake(../code/chapter-03/CmakeLists.txt)
 ```
 
 The `ENABLE_EXPORTS` property makes symbols in the executable available
