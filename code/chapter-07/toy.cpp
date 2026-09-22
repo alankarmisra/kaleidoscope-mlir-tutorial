@@ -1,9 +1,15 @@
 #include "../include/KaleidoscopeJIT.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
+#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
+#include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
@@ -18,11 +24,13 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
+#include <cassert>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -44,7 +52,21 @@ enum Token {
 
   // primary
   tok_identifier = -4,
-  tok_number = -5
+  tok_number = -5,
+
+  // control
+  tok_if = -6,
+  tok_then = -7,
+  tok_else = -8,
+  tok_for = -9,
+  tok_in = -10,
+
+  // operators
+  tok_binary = -11,
+  tok_unary = -12,
+
+  // var definition
+  tok_var = -13
 };
 
 static std::string IdentifierStr; // Filled in if tok_identifier
@@ -67,6 +89,22 @@ static int gettok() {
       return tok_def;
     if (IdentifierStr == "extern")
       return tok_extern;
+    if (IdentifierStr == "if")
+      return tok_if;
+    if (IdentifierStr == "then")
+      return tok_then;
+    if (IdentifierStr == "else")
+      return tok_else;
+    if (IdentifierStr == "for")
+      return tok_for;
+    if (IdentifierStr == "in")
+      return tok_in;
+    if (IdentifierStr == "binary")
+      return tok_binary;
+    if (IdentifierStr == "unary")
+      return tok_unary;
+    if (IdentifierStr == "var")
+      return tok_var;
     return tok_identifier;
   }
 
@@ -113,6 +151,7 @@ public:
   virtual ~ExprAST() = default;
 
   virtual Value codegen() = 0;
+  virtual const std::string *getVariableName() const { return nullptr; }
 };
 
 /// NumberExprAST - Expression class for numeric literals like "1.0".
@@ -131,6 +170,19 @@ class VariableExprAST : public ExprAST {
 
 public:
   VariableExprAST(const std::string &Name) : Name(Name) {}
+
+  Value codegen() override;
+  const std::string *getVariableName() const override { return &Name; }
+};
+
+/// UnaryExprAST - Expression class for a unary operator.
+class UnaryExprAST : public ExprAST {
+  char Opcode;
+  std::unique_ptr<ExprAST> Operand;
+
+public:
+  UnaryExprAST(char Opcode, std::unique_ptr<ExprAST> Operand)
+      : Opcode(Opcode), Operand(std::move(Operand)) {}
 
   Value codegen() override;
 };
@@ -161,20 +213,75 @@ public:
   Value codegen() override;
 };
 
+/// IfExprAST - Expression class for if/then/else.
+class IfExprAST : public ExprAST {
+  std::unique_ptr<ExprAST> Cond, Then, Else;
+
+public:
+  IfExprAST(std::unique_ptr<ExprAST> Cond, std::unique_ptr<ExprAST> Then,
+            std::unique_ptr<ExprAST> Else)
+      : Cond(std::move(Cond)), Then(std::move(Then)), Else(std::move(Else)) {}
+
+  Value codegen() override;
+};
+
+/// ForExprAST - Expression class for for/in.
+class ForExprAST : public ExprAST {
+  std::string VarName;
+  std::unique_ptr<ExprAST> Start, End, Step, Body;
+
+public:
+  ForExprAST(const std::string &VarName, std::unique_ptr<ExprAST> Start,
+             std::unique_ptr<ExprAST> End, std::unique_ptr<ExprAST> Step,
+             std::unique_ptr<ExprAST> Body)
+      : VarName(VarName), Start(std::move(Start)), End(std::move(End)),
+        Step(std::move(Step)), Body(std::move(Body)) {}
+
+  Value codegen() override;
+};
+
+/// VarExprAST - Expression class for var/in.
+class VarExprAST : public ExprAST {
+  std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames;
+  std::unique_ptr<ExprAST> Body;
+
+public:
+  VarExprAST(
+      std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames,
+      std::unique_ptr<ExprAST> Body)
+      : VarNames(std::move(VarNames)), Body(std::move(Body)) {}
+
+  Value codegen() override;
+};
+
 /// PrototypeAST - This class represents the "prototype" for a function,
 /// which captures its name, and its argument names (thus implicitly the number
 /// of arguments the function takes).
 class PrototypeAST {
   std::string Name;
   std::vector<std::string> Args;
+  bool IsOperator;
+  unsigned Precedence; // Precedence if a binary op.
 
 public:
-  PrototypeAST(const std::string &Name, std::vector<std::string> Args)
-      : Name(Name), Args(std::move(Args)) {}
+  PrototypeAST(const std::string &Name, std::vector<std::string> Args,
+               bool IsOperator = false, unsigned Prec = 0)
+      : Name(Name), Args(std::move(Args)), IsOperator(IsOperator),
+        Precedence(Prec) {}
 
   func::FuncOp codegen();
   const std::string &getName() const { return Name; }
   const std::vector<std::string> &getArgs() const { return Args; }
+
+  bool isUnaryOp() const { return IsOperator && Args.size() == 1; }
+  bool isBinaryOp() const { return IsOperator && Args.size() == 2; }
+
+  char getOperatorName() const {
+    assert(isUnaryOp() || isBinaryOp());
+    return Name.back();
+  }
+
+  unsigned getBinaryPrecedence() const { return Precedence; }
 };
 
 /// FunctionAST - This class represents a function definition itself.
@@ -286,10 +393,128 @@ static std::unique_ptr<ExprAST> ParseIdentifierExpr() {
   return std::make_unique<CallExprAST>(IdName, std::move(Args));
 }
 
+/// ifexpr ::= 'if' expression 'then' expression 'else' expression
+static std::unique_ptr<ExprAST> ParseIfExpr() {
+  getNextToken(); // eat the if.
+
+  auto Cond = ParseExpression();
+  if (!Cond)
+    return nullptr;
+
+  if (CurTok != tok_then)
+    return LogError("expected then");
+  getNextToken(); // eat the then.
+
+  auto Then = ParseExpression();
+  if (!Then)
+    return nullptr;
+
+  if (CurTok != tok_else)
+    return LogError("expected else");
+  getNextToken(); // eat the else.
+
+  auto Else = ParseExpression();
+  if (!Else)
+    return nullptr;
+
+  return std::make_unique<IfExprAST>(std::move(Cond), std::move(Then),
+                                     std::move(Else));
+}
+
+/// forexpr ::= 'for' identifier '=' expr ',' expr (',' expr)? 'in' expression
+static std::unique_ptr<ExprAST> ParseForExpr() {
+  getNextToken(); // eat the for.
+
+  if (CurTok != tok_identifier)
+    return LogError("expected identifier after for");
+
+  std::string IdName = IdentifierStr;
+  getNextToken(); // eat identifier.
+
+  if (CurTok != '=')
+    return LogError("expected '=' after for");
+  getNextToken(); // eat '='.
+
+  auto Start = ParseExpression();
+  if (!Start)
+    return nullptr;
+  if (CurTok != ',')
+    return LogError("expected ',' after for start value");
+  getNextToken();
+
+  auto End = ParseExpression();
+  if (!End)
+    return nullptr;
+
+  // The step value is optional.
+  std::unique_ptr<ExprAST> Step;
+  if (CurTok == ',') {
+    getNextToken();
+    Step = ParseExpression();
+    if (!Step)
+      return nullptr;
+  }
+
+  if (CurTok != tok_in)
+    return LogError("expected 'in' after for");
+  getNextToken(); // eat the in.
+
+  auto Body = ParseExpression();
+  if (!Body)
+    return nullptr;
+
+  return std::make_unique<ForExprAST>(IdName, std::move(Start), std::move(End),
+                                      std::move(Step), std::move(Body));
+}
+
+/// varexpr ::= 'var' identifier ('=' expression)?
+///                    (',' identifier ('=' expression)?)* 'in' expression
+static std::unique_ptr<ExprAST> ParseVarExpr() {
+  getNextToken(); // eat the var.
+
+  std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames;
+  if (CurTok != tok_identifier)
+    return LogError("expected identifier after var");
+
+  while (true) {
+    std::string Name = IdentifierStr;
+    getNextToken(); // eat identifier.
+
+    std::unique_ptr<ExprAST> Init;
+    if (CurTok == '=') {
+      getNextToken(); // eat '='.
+      Init = ParseExpression();
+      if (!Init)
+        return nullptr;
+    }
+
+    VarNames.emplace_back(Name, std::move(Init));
+
+    if (CurTok != ',')
+      break;
+    getNextToken(); // eat ','.
+    if (CurTok != tok_identifier)
+      return LogError("expected identifier list after var");
+  }
+
+  if (CurTok != tok_in)
+    return LogError("expected 'in' keyword after 'var'");
+  getNextToken(); // eat 'in'.
+
+  auto Body = ParseExpression();
+  if (!Body)
+    return nullptr;
+
+  return std::make_unique<VarExprAST>(std::move(VarNames), std::move(Body));
+}
+
 /// primary
 ///   ::= identifierexpr
 ///   ::= numberexpr
 ///   ::= parenexpr
+///   ::= ifexpr
+///   ::= forexpr
+///   ::= varexpr
 static std::unique_ptr<ExprAST> ParsePrimary() {
   switch (CurTok) {
   default:
@@ -300,11 +525,33 @@ static std::unique_ptr<ExprAST> ParsePrimary() {
     return ParseNumberExpr();
   case '(':
     return ParseParenExpr();
+  case tok_if:
+    return ParseIfExpr();
+  case tok_for:
+    return ParseForExpr();
+  case tok_var:
+    return ParseVarExpr();
   }
 }
 
+/// unary
+///   ::= primary
+///   ::= '!' unary
+static std::unique_ptr<ExprAST> ParseUnary() {
+  // If the current token is not an operator, it must be a primary expression.
+  if (!isascii(CurTok) || CurTok == '(' || CurTok == ',')
+    return ParsePrimary();
+
+  // If this is a unary operator, read it.
+  int Opc = CurTok;
+  getNextToken();
+  if (auto Operand = ParseUnary())
+    return std::make_unique<UnaryExprAST>(Opc, std::move(Operand));
+  return nullptr;
+}
+
 /// binoprhs
-///   ::= ('+' primary)*
+///   ::= ('+' unary)*
 static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
                                               std::unique_ptr<ExprAST> LHS) {
   // If this is a binop, find its precedence.
@@ -320,8 +567,8 @@ static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
     int BinOp = CurTok;
     getNextToken(); // eat binop
 
-    // Parse the primary expression after the binary operator.
-    auto RHS = ParsePrimary();
+    // Parse the unary expression after the binary operator.
+    auto RHS = ParseUnary();
     if (!RHS)
       return nullptr;
 
@@ -341,10 +588,10 @@ static std::unique_ptr<ExprAST> ParseBinOpRHS(int ExprPrec,
 }
 
 /// expression
-///   ::= primary binoprhs
+///   ::= unary binoprhs
 ///
 static std::unique_ptr<ExprAST> ParseExpression() {
-  auto LHS = ParsePrimary();
+  auto LHS = ParseUnary();
   if (!LHS)
     return nullptr;
 
@@ -353,12 +600,47 @@ static std::unique_ptr<ExprAST> ParseExpression() {
 
 /// prototype
 ///   ::= id '(' id* ')'
+///   ::= binary LETTER number? (id, id)
+///   ::= unary LETTER (id)
 static std::unique_ptr<PrototypeAST> ParsePrototype() {
-  if (CurTok != tok_identifier)
-    return LogErrorP("Expected function name in prototype");
+  std::string FnName;
+  unsigned Kind = 0; // 0 = identifier, 1 = unary, 2 = binary.
+  unsigned BinaryPrecedence = 30;
 
-  std::string FnName = IdentifierStr;
-  getNextToken();
+  switch (CurTok) {
+  default:
+    return LogErrorP("Expected function name in prototype");
+  case tok_identifier:
+    FnName = IdentifierStr;
+    getNextToken();
+    break;
+  case tok_unary:
+    getNextToken();
+    if (!isascii(CurTok))
+      return LogErrorP("Expected unary operator");
+    FnName = "unary";
+    FnName += static_cast<char>(CurTok);
+    Kind = 1;
+    getNextToken();
+    break;
+  case tok_binary:
+    getNextToken();
+    if (!isascii(CurTok))
+      return LogErrorP("Expected binary operator");
+    FnName = "binary";
+    FnName += static_cast<char>(CurTok);
+    Kind = 2;
+    getNextToken();
+
+    // Read the precedence if present.
+    if (CurTok == tok_number) {
+      if (NumVal < 1 || NumVal > 100)
+        return LogErrorP("Invalid precedence: must be 1..100");
+      BinaryPrecedence = static_cast<unsigned>(NumVal);
+      getNextToken();
+    }
+    break;
+  }
 
   if (CurTok != '(')
     return LogErrorP("Expected '(' in prototype");
@@ -372,7 +654,12 @@ static std::unique_ptr<PrototypeAST> ParsePrototype() {
   // success.
   getNextToken(); // eat ')'.
 
-  return std::make_unique<PrototypeAST>(FnName, std::move(ArgNames));
+  // Verify the right number of names for an operator.
+  if (Kind && ArgNames.size() != Kind)
+    return LogErrorP("Invalid number of operands for operator");
+
+  return std::make_unique<PrototypeAST>(FnName, std::move(ArgNames), Kind != 0,
+                                        BinaryPrecedence);
 }
 
 /// definition ::= 'def' prototype expression
@@ -419,9 +706,10 @@ static llvm::ExitOnError ExitOnErr;
 static llvm::cl::opt<bool> DumpMLIR(
     "dump-mlir", llvm::cl::desc("Print generated MLIR"),
     llvm::cl::init(false));
-static llvm::cl::opt<bool> DumpLLVMIR(
-    "dump-llvm-ir", llvm::cl::desc("Print translated LLVM IR"),
-    llvm::cl::init(false));
+static llvm::cl::opt<bool>
+    DumpLLVMIR("dump-llvm-ir",
+             llvm::cl::desc("Print LLVM IR before adding it to the JIT"),
+             llvm::cl::init(false));
 
 static Location getLocation() { return TheBuilder->getUnknownLoc(); }
 
@@ -446,6 +734,22 @@ func::FuncOp getFunction(const std::string &Name) {
   return {};
 }
 
+static func::FuncOp getCurrentFunction() {
+  Operation *Parent = TheBuilder->getInsertionBlock()->getParentOp();
+  if (auto Function = dyn_cast<func::FuncOp>(Parent))
+    return Function;
+  return Parent->getParentOfType<func::FuncOp>();
+}
+
+/// CreateEntryBlockAlloca - Create mutable storage in the function entry block.
+static Value CreateEntryBlockAlloca() {
+  func::FuncOp Function = getCurrentFunction();
+  OpBuilder::InsertionGuard Guard(*TheBuilder);
+  TheBuilder->setInsertionPointToStart(&Function.front());
+  auto VariableType = MemRefType::get({}, TheBuilder->getF64Type());
+  return TheBuilder->create<memref::AllocaOp>(getLocation(), VariableType);
+}
+
 Value NumberExprAST::codegen() {
   return TheBuilder->create<arith::ConstantOp>(
       getLocation(), TheBuilder->getF64FloatAttr(Val));
@@ -456,10 +760,44 @@ Value VariableExprAST::codegen() {
   auto It = NamedValues.find(Name);
   if (It == NamedValues.end())
     return LogErrorV("Unknown variable name");
-  return It->second;
+
+  return TheBuilder->create<memref::LoadOp>(getLocation(), It->second,
+                                             ValueRange{});
+}
+
+Value UnaryExprAST::codegen() {
+  Value OperandV = Operand->codegen();
+  if (!OperandV)
+    return {};
+
+  auto Operator = getFunction(std::string("unary") + Opcode);
+  if (!Operator)
+    return LogErrorV("Unknown unary operator");
+
+  return TheBuilder->create<func::CallOp>(getLocation(), Operator, OperandV)
+      .getResult(0);
 }
 
 Value BinaryExprAST::codegen() {
+  // Assignment stores into the variable's mutable memref slot.
+  if (Op == '=') {
+    const std::string *Name = LHS->getVariableName();
+    if (!Name)
+      return LogErrorV("destination of '=' must be a variable");
+
+    Value AssignedValue = RHS->codegen();
+    if (!AssignedValue)
+      return {};
+
+    auto It = NamedValues.find(*Name);
+    if (It == NamedValues.end())
+      return LogErrorV("Unknown variable name");
+
+    TheBuilder->create<memref::StoreOp>(getLocation(), AssignedValue,
+                                        It->second, ValueRange{});
+    return AssignedValue;
+  }
+
   Value L = LHS->codegen();
   Value R = RHS->codegen();
   if (!L || !R)
@@ -480,8 +818,17 @@ Value BinaryExprAST::codegen() {
         getLocation(), TheBuilder->getF64Type(), Comparison);
   }
   default:
-    return LogErrorV("invalid binary operator");
+    break;
   }
+
+  // If it wasn't a builtin binary operator, it must be a user-defined one.
+  auto Operator = getFunction(std::string("binary") + Op);
+  if (!Operator)
+    return LogErrorV("Unknown binary operator");
+
+  Value Operands[] = {L, R};
+  return TheBuilder->create<func::CallOp>(getLocation(), Operator, Operands)
+      .getResult(0);
 }
 
 Value CallExprAST::codegen() {
@@ -503,6 +850,158 @@ Value CallExprAST::codegen() {
 
   return TheBuilder->create<func::CallOp>(getLocation(), CalleeF, ArgsV)
       .getResult(0);
+}
+
+Value IfExprAST::codegen() {
+  Value CondV = Cond->codegen();
+  if (!CondV)
+    return {};
+
+  // Convert the condition to a boolean by comparing it with 0.0.
+  Value Zero = TheBuilder->create<arith::ConstantOp>(
+      getLocation(), TheBuilder->getF64FloatAttr(0.0));
+  CondV = TheBuilder->create<arith::CmpFOp>(
+      getLocation(), arith::CmpFPredicate::ONE, CondV, Zero);
+
+  bool CodegenFailed = false;
+  auto IfOp = TheBuilder->create<scf::IfOp>(
+      getLocation(), CondV,
+      [&](OpBuilder &Builder, Location Loc) {
+        Value ThenV = Then->codegen();
+        if (!ThenV) {
+          CodegenFailed = true;
+          ThenV = Builder.create<arith::ConstantOp>(
+              Loc, Builder.getF64FloatAttr(0.0));
+        }
+        Builder.create<scf::YieldOp>(Loc, ThenV);
+      },
+      [&](OpBuilder &Builder, Location Loc) {
+        Value ElseV = Else->codegen();
+        if (!ElseV) {
+          CodegenFailed = true;
+          ElseV = Builder.create<arith::ConstantOp>(
+              Loc, Builder.getF64FloatAttr(0.0));
+        }
+        Builder.create<scf::YieldOp>(Loc, ElseV);
+      });
+
+  if (CodegenFailed)
+    return {};
+  return IfOp.getResult(0);
+}
+
+Value ForExprAST::codegen() {
+  // Emit the start value before putting the loop variable in scope.
+  Value StartVal = Start->codegen();
+  if (!StartVal)
+    return {};
+
+  Value Variable = CreateEntryBlockAlloca();
+  TheBuilder->create<memref::StoreOp>(getLocation(), StartVal, Variable,
+                                      ValueRange{});
+
+  auto OldValue = NamedValues.find(VarName);
+  bool HadOldValue = OldValue != NamedValues.end();
+  Value SavedValue = HadOldValue ? OldValue->second : Value();
+  NamedValues[VarName] = Variable;
+  bool CodegenFailed = false;
+
+  // Test the condition before each iteration, then emit the body and step.
+  TheBuilder->create<scf::WhileOp>(
+      getLocation(), TypeRange{}, ValueRange{},
+      [&](OpBuilder &Builder, Location Loc, ValueRange) {
+        Value EndCond = End->codegen();
+        if (!EndCond) {
+          CodegenFailed = true;
+          EndCond = Builder.create<arith::ConstantOp>(
+              Loc, Builder.getF64FloatAttr(0.0));
+        }
+
+        Value Zero = Builder.create<arith::ConstantOp>(
+            Loc, Builder.getF64FloatAttr(0.0));
+        EndCond = Builder.create<arith::CmpFOp>(Loc, arith::CmpFPredicate::ONE,
+                                                EndCond, Zero);
+        Builder.create<scf::ConditionOp>(Loc, EndCond, ValueRange{});
+      },
+      [&](OpBuilder &Builder, Location Loc, ValueRange) {
+        if (!Body->codegen())
+          CodegenFailed = true;
+
+        Value StepVal;
+        if (Step)
+          StepVal = Step->codegen();
+        else
+          StepVal = Builder.create<arith::ConstantOp>(
+              Loc, Builder.getF64FloatAttr(1.0));
+        if (!StepVal) {
+          CodegenFailed = true;
+          StepVal = Builder.create<arith::ConstantOp>(
+              Loc, Builder.getF64FloatAttr(1.0));
+        }
+
+        // Reload after the body and step in case either mutated the variable.
+        Value Current =
+            Builder.create<memref::LoadOp>(Loc, Variable, ValueRange{});
+        Value NextVar = Builder.create<arith::AddFOp>(Loc, Current, StepVal);
+        Builder.create<memref::StoreOp>(Loc, NextVar, Variable, ValueRange{});
+        Builder.create<scf::YieldOp>(Loc);
+      });
+
+  // Restore any variable shadowed by the loop induction variable.
+  if (HadOldValue)
+    NamedValues[VarName] = SavedValue;
+  else
+    NamedValues.erase(VarName);
+
+  if (CodegenFailed)
+    return {};
+
+  // A for expression always returns 0.0.
+  return TheBuilder->create<arith::ConstantOp>(
+      getLocation(), TheBuilder->getF64FloatAttr(0.0));
+}
+
+Value VarExprAST::codegen() {
+  std::vector<std::pair<std::string, std::optional<Value>>> OldBindings;
+
+  auto RestoreBindings = [&]() {
+    for (auto It = OldBindings.rbegin(); It != OldBindings.rend(); ++It) {
+      if (It->second)
+        NamedValues[It->first] = *It->second;
+      else
+        NamedValues.erase(It->first);
+    }
+  };
+
+  for (auto &Variable : VarNames) {
+    const std::string &Name = Variable.first;
+
+    // Generate the initializer before introducing the new binding.
+    Value InitialValue;
+    if (Variable.second)
+      InitialValue = Variable.second->codegen();
+    else
+      InitialValue = TheBuilder->create<arith::ConstantOp>(
+          getLocation(), TheBuilder->getF64FloatAttr(0.0));
+    if (!InitialValue) {
+      RestoreBindings();
+      return {};
+    }
+
+    Value Storage = CreateEntryBlockAlloca();
+    TheBuilder->create<memref::StoreOp>(getLocation(), InitialValue, Storage,
+                                        ValueRange{});
+
+    auto Old = NamedValues.find(Name);
+    OldBindings.emplace_back(
+        Name, Old == NamedValues.end() ? std::optional<Value>()
+                                      : std::optional<Value>(Old->second));
+    NamedValues[Name] = Storage;
+  }
+
+  Value BodyValue = Body->codegen();
+  RestoreBindings();
+  return BodyValue;
 }
 
 func::FuncOp PrototypeAST::codegen() {
@@ -534,15 +1033,23 @@ func::FuncOp FunctionAST::codegen() {
   // declaration created the function with private symbol visibility.
   TheFunction.setPublic();
 
+  // If this is a binary operator, install its precedence.
+  if (P.isBinaryOp())
+    BinopPrecedence[P.getOperatorName()] = P.getBinaryPrecedence();
+
   // Create a new basic block to start insertion into.
   Block *EntryBlock = TheFunction.addEntryBlock();
   TheBuilder->setInsertionPointToStart(EntryBlock);
 
-  // Record the function arguments in the NamedValues map.
+  // Give each function argument a mutable storage slot.
   NamedValues.clear();
   unsigned Index = 0;
-  for (BlockArgument Argument : TheFunction.getArguments())
-    NamedValues[P.getArgs()[Index++]] = Argument;
+  for (BlockArgument Argument : TheFunction.getArguments()) {
+    Value Storage = CreateEntryBlockAlloca();
+    TheBuilder->create<memref::StoreOp>(getLocation(), Argument, Storage,
+                                        ValueRange{});
+    NamedValues[P.getArgs()[Index++]] = Storage;
+  }
 
   if (Value RetVal = Body->codegen()) {
     // Finish off the function.
@@ -554,6 +1061,8 @@ func::FuncOp FunctionAST::codegen() {
       if (failed(ThePM->run(*TheModule))) {
         LogError("Could not optimize function.");
         TheFunction.erase();
+        if (P.isBinaryOp())
+          BinopPrecedence.erase(P.getOperatorName());
         return {};
       }
       return TheFunction;
@@ -562,6 +1071,8 @@ func::FuncOp FunctionAST::codegen() {
 
   // Error reading body, remove function.
   TheFunction.erase();
+  if (P.isBinaryOp())
+    BinopPrecedence.erase(P.getOperatorName());
   return {};
 }
 
@@ -578,7 +1089,9 @@ static void InitializeModuleAndManagers() {
 
   // Open a new context and module.
   TheContext = std::make_unique<MLIRContext>();
-  TheContext->loadDialect<arith::ArithDialect, func::FuncDialect>();
+  TheContext->loadDialect<arith::ArithDialect, cf::ControlFlowDialect,
+                          func::FuncDialect, memref::MemRefDialect,
+                          scf::SCFDialect>();
   TheModule = ModuleOp::create(UnknownLoc::get(TheContext.get()));
 
   // Create a new builder for the module.
@@ -593,8 +1106,11 @@ static void InitializeModuleAndManagers() {
 static llvm::Expected<llvm::orc::ThreadSafeModule> lowerToLLVM() {
   // Lower the high-level MLIR operations to the LLVM dialect.
   PassManager LoweringPM(TheContext.get());
+  LoweringPM.addPass(createSCFToControlFlowPass());
   LoweringPM.addPass(createConvertFuncToLLVMPass());
   LoweringPM.addPass(createArithToLLVMConversionPass());
+  LoweringPM.addPass(createFinalizeMemRefToLLVMConversionPass());
+  LoweringPM.addPass(createConvertControlFlowToLLVMPass());
 
   // Clean up any temporary casts introduced by dialect conversion.
   LoweringPM.addPass(createReconcileUnrealizedCastsPass());
@@ -743,12 +1259,14 @@ static void MainLoop() {
 
 int main(int argc, char **argv) {
   llvm::cl::ParseCommandLineOptions(argc, argv, "Kaleidoscope JIT\n");
+
   llvm::InitializeNativeTarget();
   llvm::InitializeNativeTargetAsmPrinter();
   llvm::InitializeNativeTargetAsmParser();
 
   // Install standard binary operators.
   // 1 is lowest precedence.
+  BinopPrecedence['='] = 2;
   BinopPrecedence['<'] = 10;
   BinopPrecedence['+'] = 20;
   BinopPrecedence['-'] = 20;

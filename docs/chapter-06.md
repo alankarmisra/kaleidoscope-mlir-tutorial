@@ -133,15 +133,16 @@ public:
   : Name(Name), Args(std::move(Args)), IsOperator(IsOperator),
     Precedence(Prec) {}
 
-  Function *codegen();
+  func::FuncOp codegen();
   const std::string &getName() const { return Name; }
+  const std::vector<std::string> &getArgs() const { return Args; }
 
   bool isUnaryOp() const { return IsOperator && Args.size() == 1; }
   bool isBinaryOp() const { return IsOperator && Args.size() == 2; }
 
   char getOperatorName() const {
     assert(isUnaryOp() || isBinaryOp());
-    return Name[Name.size() - 1];
+    return Name.back();
   }
 
   unsigned getBinaryPrecedence() const { return Precedence; }
@@ -170,7 +171,6 @@ static std::unique_ptr<PrototypeAST> ParsePrototype() {
     return LogErrorP("Expected function name in prototype");
   case tok_identifier:
     FnName = IdentifierStr;
-    Kind = 0;
     getNextToken();
     break;
   case tok_binary:
@@ -178,7 +178,7 @@ static std::unique_ptr<PrototypeAST> ParsePrototype() {
     if (!isascii(CurTok))
       return LogErrorP("Expected binary operator");
     FnName = "binary";
-    FnName += (char)CurTok;
+    FnName += static_cast<char>(CurTok);
     Kind = 2;
     getNextToken();
 
@@ -186,7 +186,7 @@ static std::unique_ptr<PrototypeAST> ParsePrototype() {
     if (CurTok == tok_number) {
       if (NumVal < 1 || NumVal > 100)
         return LogErrorP("Invalid precedence: must be 1..100");
-      BinaryPrecedence = (unsigned)NumVal;
+      BinaryPrecedence = static_cast<unsigned>(NumVal);
       getNextToken();
     }
     break;
@@ -208,8 +208,8 @@ static std::unique_ptr<PrototypeAST> ParsePrototype() {
   if (Kind && ArgNames.size() != Kind)
     return LogErrorP("Invalid number of operands for operator");
 
-  return std::make_unique<PrototypeAST>(FnName, std::move(ArgNames), Kind != 0,
-                                         BinaryPrecedence);
+  return std::make_unique<PrototypeAST>(FnName, std::move(ArgNames),
+                                        Kind != 0, BinaryPrecedence);
 }
 ```
 
@@ -226,35 +226,38 @@ operators. Given our current structure, this is a simple addition of a
 default case for our existing binary operator node:
 
 ```cpp
-Value *BinaryExprAST::codegen() {
-  Value *L = LHS->codegen();
-  Value *R = RHS->codegen();
+Value BinaryExprAST::codegen() {
+  Value L = LHS->codegen();
+  Value R = RHS->codegen();
   if (!L || !R)
-    return nullptr;
+    return {};
 
   switch (Op) {
   case '+':
-    return Builder->CreateFAdd(L, R, "addtmp");
+    return TheBuilder->create<arith::AddFOp>(getLocation(), L, R);
   case '-':
-    return Builder->CreateFSub(L, R, "subtmp");
+    return TheBuilder->create<arith::SubFOp>(getLocation(), L, R);
   case '*':
-    return Builder->CreateFMul(L, R, "multmp");
-  case '<':
-    L = Builder->CreateFCmpULT(L, R, "cmptmp");
-    // Convert bool 0/1 to double 0.0 or 1.0
-    return Builder->CreateUIToFP(L, Type::getDoubleTy(*TheContext),
-                                "booltmp");
+    return TheBuilder->create<arith::MulFOp>(getLocation(), L, R);
+  case '<': {
+    Value Comparison = TheBuilder->create<arith::CmpFOp>(
+        getLocation(), arith::CmpFPredicate::ULT, L, R);
+    // Convert bool 0/1 to double 0.0 or 1.0.
+    return TheBuilder->create<arith::UIToFPOp>(
+        getLocation(), TheBuilder->getF64Type(), Comparison);
+  }
   default:
     break;
   }
 
-  // If it wasn't a builtin binary operator, it must be a user defined one. Emit
-  // a call to it.
-  Function *F = getFunction(std::string("binary") + Op);
-  assert(F && "binary operator not found!");
+  // If it wasn't a builtin binary operator, it must be a user-defined one.
+  auto Operator = getFunction(std::string("binary") + Op);
+  if (!Operator)
+    return LogErrorV("Unknown binary operator");
 
-  Value *Ops[2] = { L, R };
-  return Builder->CreateCall(F, Ops, "binop");
+  Value Operands[] = {L, R};
+  return TheBuilder->create<func::CallOp>(getLocation(), Operator, Operands)
+      .getResult(0);
 }
 ```
 
@@ -267,21 +270,28 @@ function with the right name) everything falls into place.
 The final piece of code we are missing, is a bit of top-level magic:
 
 ```cpp
-Function *FunctionAST::codegen() {
-  // Transfer ownership of the prototype to the FunctionProtos map, but keep a
-  // reference to it for use below.
+func::FuncOp FunctionAST::codegen() {
+  // Save the prototype so declarations can be emitted in later modules.
   auto &P = *Proto;
   FunctionProtos[Proto->getName()] = std::move(Proto);
-  Function *TheFunction = getFunction(P.getName());
+  auto TheFunction = getFunction(P.getName());
   if (!TheFunction)
-    return nullptr;
+    return {};
 
-  // If this is an operator, install it.
+  if (!TheFunction.isDeclaration()) {
+    LogError("Function cannot be redefined.");
+    return {};
+  }
+
+  TheFunction.setPublic();
+
+  // If this is a binary operator, install its precedence.
   if (P.isBinaryOp())
     BinopPrecedence[P.getOperatorName()] = P.getBinaryPrecedence();
 
   // Create a new basic block to start insertion into.
-  BasicBlock *BB = BasicBlock::Create(*TheContext, "entry", TheFunction);
+  Block *EntryBlock = TheFunction.addEntryBlock();
+  TheBuilder->setInsertionPointToStart(EntryBlock);
   ...
 ```
 
@@ -313,7 +323,7 @@ public:
   UnaryExprAST(char Opcode, std::unique_ptr<ExprAST> Operand)
     : Opcode(Opcode), Operand(std::move(Operand)) {}
 
-  Value *codegen() override;
+  Value codegen() override;
 };
 ```
 
@@ -396,7 +406,6 @@ static std::unique_ptr<PrototypeAST> ParsePrototype() {
     return LogErrorP("Expected function name in prototype");
   case tok_identifier:
     FnName = IdentifierStr;
-    Kind = 0;
     getNextToken();
     break;
   case tok_unary:
@@ -404,7 +413,7 @@ static std::unique_ptr<PrototypeAST> ParsePrototype() {
     if (!isascii(CurTok))
       return LogErrorP("Expected unary operator");
     FnName = "unary";
-    FnName += (char)CurTok;
+    FnName += static_cast<char>(CurTok);
     Kind = 1;
     getNextToken();
     break;
@@ -418,16 +427,17 @@ time. Speaking of, the final piece we need to add is codegen support for
 unary operators. It looks like this:
 
 ```cpp
-Value *UnaryExprAST::codegen() {
-  Value *OperandV = Operand->codegen();
+Value UnaryExprAST::codegen() {
+  Value OperandV = Operand->codegen();
   if (!OperandV)
-    return nullptr;
+    return {};
 
-  Function *F = getFunction(std::string("unary") + Opcode);
-  if (!F)
+  auto Operator = getFunction(std::string("unary") + Opcode);
+  if (!Operator)
     return LogErrorV("Unknown unary operator");
 
-  return Builder->CreateCall(F, OperandV, "unop");
+  return TheBuilder->create<func::CallOp>(getLocation(), Operator, OperandV)
+      .getResult(0);
 }
 ```
 
@@ -447,10 +457,14 @@ newline):
 ```
 ready> extern printd(x);
 Read extern:
-declare double @printd(double)
+func.func private @printd(f64) -> f64
 
 ready> def binary : 1 (x y) 0;  # Low-precedence operator that ignores operands.
-...
+Read function definition:
+func.func @"binary:"(%arg0: f64, %arg1: f64) -> f64 {
+  %cst = arith.constant 0.000000e+00 : f64
+  return %cst : f64
+}
 ready> printd(123) : printd(456) : printd(789);
 123.000000
 456.000000
@@ -508,7 +522,8 @@ denser the character:
 
 ```
 ready> extern putchard(char);
-...
+Read extern:
+func.func private @putchard(f64) -> f64
 ready> def printdensity(d)
   if d > 8 then
     putchard(32)  # ' '
@@ -518,7 +533,6 @@ ready> def printdensity(d)
     putchard(43)  # '+'
   else
     putchard(42); # '*'
-...
 ready> printdensity(1): printdensity(2): printdensity(3):
        printdensity(4): printdensity(5): printdensity(9):
        putchard(10);
@@ -733,10 +747,10 @@ Here is the complete code listing for our running example, enhanced with
 the support for user-defined operators. To build this example, use:
 
 ```bash
-# Compile
-clang++ -g toy.cpp `llvm-config --cxxflags --ldflags --system-libs --libs core orcjit native` -O3 -o toy
-# Run
-./toy
+cmake -S . -B build \
+  -DMLIR_DIR=/path/to/llvm-project/build/lib/cmake/mlir
+cmake --build build
+./build/toy
 ```
 
 On some platforms, you will need to specify -rdynamic or
@@ -748,8 +762,7 @@ will cause problems on Windows.
 
 Here is the code:
 
-```{literalinclude} ../../../examples/Kaleidoscope/Chapter6/toy.cpp
-:language: c++
+```cpp(../code/chapter-06/toy.cpp)
 ```
 
 [Next: Extending the language: mutable variables / SSA

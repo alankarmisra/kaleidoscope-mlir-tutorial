@@ -5,11 +5,14 @@
 Welcome to Chapter 3 of the "[Implementing a language with
 MLIR](chapter-00.md)" tutorial. This chapter shows you how to transform
 the [Abstract Syntax Tree](chapter-02.md), built in Chapter 2, into
-MLIR. This will teach you a little bit about how MLIR does things, as
+MLIR, and, in the next chapter, to LLVM IR. This will teach you a little bit about how MLIR does things, as
 well as demonstrate how easy it is to use. It's much more work to build
 a lexer and parser than it is to generate MLIR code. :)
 
-**Please note**: the code in this chapter and later requires MLIR from the LLVM project. MLIR's C++ APIs can change between LLVM project releases, so the version of this tutorial should match the LLVM project version used to build MLIR. If you are using an official release, use the corresponding source and documentation from the [LLVM project releases page](https://llvm.org/releases/).
+**Please note**: the code in this chapter and later was written and
+tested with MLIR from LLVM 21.1.6. MLIR's C++ APIs can change between
+LLVM releases, so other versions may require changes. LLVM releases are
+available from the [LLVM project releases page](https://llvm.org/releases/).
 
 ## Code Generation Setup
 
@@ -36,7 +39,7 @@ public:
 ...
 ```
 
-The codegen() method says to emit IR for that AST node along with all the things it depends on, and they all return an MLIR Value object. "Value" is the class used to represent a "[Static Single Assignment (SSA)](http://en.wikipedia.org/wiki/Static_single_assignment_form) register" or "SSA value" in MLIR. The most distinct aspect of SSA values is that their value is computed as the related operation executes, and it does not get a new value until (and if) the operation re-executes. In other words, there is no way to "change" an SSA value. For more information, please read up on [Static Single Assignment](http://en.wikipedia.org/wiki/Static_single_assignment_form) - the concepts are really quite natural once you grok them.
+The codegen() method says to emit IR for that AST node along with all the things it depends on, and they all return an MLIR Value object. "Value" is the class used to represent a "[Static Single Assignment (SSA)](http://en.wikipedia.org/wiki/Static_single_assignment_form) value" or "SSA value" in MLIR. The most distinct aspect of SSA values is that their value is computed as the related operation executes, and it does not get a new value until (and if) the operation re-executes. In other words, there is no way to "change" an SSA value. For more information, please read up on [Static Single Assignment](http://en.wikipedia.org/wiki/Static_single_assignment_form) - the concepts are really quite natural once you grok them.
 
 Note that instead of adding virtual methods to the ExprAST class hierarchy, it could also make sense to use a [visitor pattern](http://en.wikipedia.org/wiki/Visitor_pattern) or some other way to model this. Again, this tutorial won't dwell on good software engineering practices: for our purposes, adding a virtual method is simplest.
 
@@ -81,15 +84,20 @@ Value NumberExprAST::codegen() {
 }
 ```
 
-In MLIR, you can represent numeric constants using the
+In MLIR, one way to represent numeric constants is to use the
 `arith::ConstantOp` operation from MLIR's
 [`arith`](https://mlir.llvm.org/docs/Dialects/ArithOps/) *dialect* for
-arithmetic operations. We will discuss dialects in more detail and build
-a custom Kaleidoscope dialect in a later chapter to represent
-language-specific operations and types that existing dialects do not
-capture directly.
+arithmetic operations. For now, you can think of dialects as libraries of related operations
+and types. The dialects used in this tutorial provide convenient ways
+to express arithmetic, functions, control flow, and memory at a higher
+level, before MLIR progressively lowers them to LLVM IR. Where relevant,
+we will compare these higher-level MLIR operations with the corresponding
+LLVM IR to see how they simplify code generation. We will discuss
+dialects in more detail and build a custom Kaleidoscope dialect in a
+later chapter to represent language-specific operations and types that
+existing dialects do not capture directly.
 
-The call to `getF64FloatAttr(Val)` creates an `f64` floating-point attribute containing the numeric value, and `create` inserts a constant operation at the builder's current insertion point. The operation produces an SSA result, which is returned as a `Value`. MLIR attributes are uniqued and shared, but the constant operations that use them are ordinary operations and are not themselves uniqued.
+The call to `getF64FloatAttr(Val)` creates an `f64` floating-point attribute containing the numeric value. This code basically just creates and inserts a constant operation at the builder's current insertion point. The operation produces an SSA result, which is returned as a `Value`. MLIR attributes are uniqued and shared which is why the float attribute uses the `get` idiom. The constant operations that use those attributes are ordinary operations and are not themselves uniqued which is why the operation uses the `create` idiom.
 
 ```cpp
 Value VariableExprAST::codegen() {
@@ -149,7 +157,12 @@ value. OpBuilder knows where to insert the newly created operation,
 all you have to do is specify what operation to create (e.g. with
 `create<arith::AddFOp>`), which operands to use (`L` and `R` here).
 
-MLIR automatically provides the result of each operation with a unique textual SSA name when the IR is printed. These names are not part of the value's identity and may change as the IR is transformed.
+MLIR automatically assigns each SSA value a unique textual name when
+the IR is printed. These names exist only to make the printed IR
+readable and are not stored as part of the value's identity. Internally,
+MLIR represents each value as a handle to an operation result or block
+argument and tracks its uses directly. Consequently, the printed names
+may change when the IR is transformed or printed again.
 
 [MLIR operations](https://mlir.llvm.org/docs/LangRef/#operations) are
 constrained by strict rules. For example, the left and right operands of
@@ -184,7 +197,7 @@ Value CallExprAST::codegen() {
 }
 ```
 
-Code generation for function calls is quite straightforward with MLIR and the `func` dialect (yes there's a dialect for most common operations - which is what makes MLIR so useful!). The code above initially does a function name lookup in the MLIR Module's symbol table. Recall that the MLIR Module is the container that holds the functions we are JIT'ing. By giving each function the same name as what the user specifies, we can use the MLIR symbol table to resolve function names for us.
+Code generation for function calls is quite straightforward with MLIR and the [func](https://mlir.llvm.org/docs/Dialects/Func/) dialect (yes there's a dialect for most common operations - which is what makes MLIR so useful!). The code above initially does a function name lookup in the MLIR Module's symbol table. Recall that the MLIR Module is the container that holds the functions we are JIT'ing. By giving each function the same name as what the user specifies, we can use the MLIR symbol table to resolve function names for us.
 
 Once we have the function to call, we recursively codegen each argument that is to be passed in, and create an MLIR [`func.call`](https://mlir.llvm.org/docs/Dialects/Func/#funccall-funccallop) Operation. In the next chapter, we'll see how these calls are lowered using the default C calling convention, allowing us to call external C functions like `sin` and `cos`.
 
@@ -314,6 +327,21 @@ we handle this by merely deleting the function we produced with the
 that they incorrectly typed in before: if we didn't delete it, it would
 live in the symbol table, with a body, preventing future redefinition.
 
+This code does have a bug, though: if `FunctionAST::codegen()` finds an
+existing MLIR function, it does not validate its type against the
+definition's own prototype. This means that an earlier `extern`
+declaration takes precedence over the function definition's signature.
+Because all Kaleidoscope values currently have type `f64`, the relevant
+difference is the number of arguments. There are a number of ways to fix
+this bug; see what you can come up with! Here is a testcase:
+
+```kaleidoscope
+extern foo(a);
+def foo(a b) a;
+```
+
+The MLIR verifier will not catch the first example because the IR we ultimately construct is internally valid—it simply represents the wrong one-argument function.
+
 ## Private declarations
 
 ```cpp
@@ -340,6 +368,52 @@ operations within the module to reference a declaration such as `cos`
 without treating it as a definition exported by the module. The actual
 `cos` function is resolved later by the JIT or linker.
 
+## The `--dump-mlir` Option
+
+By default, the compiler does not print the generated MLIR. To see the IR,
+run Kaleidoscope with the `--dump-mlir` option:
+
+<!-- code-merge:start -->
+```bash
+$ build/toy --dump-mlir
+```
+```kaleidoscope
+ready> def add(a b) a + b;
+```
+```text
+Read function definition:
+```
+```mlir
+func.func @add(%arg0: f64, %arg1: f64) -> f64 {
+  %0 = arith.addf %arg0, %arg1 : f64
+  return %0 : f64
+}
+```
+<!-- code-merge:end -->
+
+The option is defined using LLVM's command-line support:
+
+```cpp
+static llvm::cl::opt<bool> DumpMLIR(
+    "dump-mlir", llvm::cl::desc("Print generated MLIR"),
+    llvm::cl::init(false));
+```
+
+After generating a function, the driver checks the option and prints the
+corresponding MLIR operation:
+
+```cpp
+if (DumpMLIR) {
+  llvm::errs() << "Read function definition:\n";
+  FnIR.print(llvm::errs(), OpPrintingFlags().assumeVerified());
+  llvm::errs() << '\n';
+}
+```
+
+At this point, the compiler produces only high-level MLIR. We will add
+lowering to LLVM IR in the next chapter when we introduce the JIT.
+
+
 ## Driver Changes and Closing Thoughts
 
 For now, code generation to MLIR doesn't really get us much, except that
@@ -348,6 +422,10 @@ codegen into the "`HandleDefinition`", "`HandleExtern`" etc
 functions, and then dumps out MLIR. This gives a nice way to look
 at the MLIR for simple functions. For example:
 
+<!-- code-merge:start -->
+```text
+$ build/toy --dump-mlir
+```
 ```mlir
 ready> 4+5;
 Read top-level expression:
@@ -358,11 +436,13 @@ func.func @__anon_expr() -> f64 {
   return %0 : f64
 }
 ```
+<!-- code-merge:end -->
+
 Note how the parser turns the top-level expression into anonymous
 functions for us. This will be handy when we add [JIT
 support](chapter-04.md#adding-a-jit-compiler) in the next chapter. Also note that the
 code is very literally transcribed, no optimizations are being performed. We will [add
-optimizations](chapter-04.md#trivial-constant-folding) explicitly in the next
+optimizations](chapter-04.md#why-we-need-an-optimization-pipeline) explicitly in the next
 chapter.
 
 ```mlir
@@ -441,10 +521,11 @@ module {
 }
 ```
 
-When you quit the current demo (by sending an EOF via CTRL+D on Linux
-or macOS, or CTRL+Z and ENTER on Windows), it dumps out the IR for the entire
-module generated. Here you can see the big picture with all the
-functions referencing each other.
+When you quit the current demo by sending an EOF via CTRL+D on Linux or
+macOS, or CTRL+Z and ENTER on Windows, it dumps the MLIR for the complete
+module. Here you can see the larger structure and how its functions
+reference one another. Top-level expressions do not appear in this final
+module because the driver erases each anonymous function after printing it.
 
 This wraps up the third chapter of the Kaleidoscope tutorial. Up next,
 we'll describe how to [add JIT codegen and optimizer

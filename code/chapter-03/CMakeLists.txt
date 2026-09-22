@@ -13,6 +13,10 @@ find_package(MLIR REQUIRED CONFIG
 
 add_executable(toy toy.cpp)
 
+if(NOT LLVM_ENABLE_RTTI)
+  target_compile_options(toy PRIVATE -fno-rtti)
+endif()
+
 target_include_directories(toy PRIVATE
   ${LLVM_INCLUDE_DIRS}
   ${MLIR_INCLUDE_DIRS}

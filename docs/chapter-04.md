@@ -9,57 +9,15 @@ language, and adding JIT compiler support. These additions will
 demonstrate how to get nice, efficient code for the Kaleidoscope
 language.
 
-## Trivial Constant Folding
+## Why We Need an Optimization Pipeline
 
 Our demonstration for Chapter 3 is elegant and easy to extend.
-Unfortunately, it does not produce wonderful code. The OpBuilder,
-however, does give us obvious optimizations when compiling simple code:
+Unfortunately, it does not produce wonderful code.
 
-```mlir
-ready> def addConstants(x) 1+2+x;
-Read function definition:
-func.func @addConstants(%arg0: f64) -> f64 {
-  %cst = arith.constant 3.000000e+00 : f64
-  %0 = arith.addf %arg0, %cst : f64
-  return %0 : f64
-}
+<!-- code-merge:start -->
+```bash
+$ build/toy --dump-mlir
 ```
-
-This code is not a literal transcription of the AST built by parsing the
-input. That would be:
-
-```mlir
-ready> def addConstantsUnoptimized(x) 1+2+x;
-Read function definition:
-func.func @addConstantsUnoptimized(%arg0: f64) -> f64 {
-  %cst = arith.constant 1.000000e+00 : f64
-  %cst_0 = arith.constant 2.000000e+00 : f64
-  %0 = arith.addf %cst, %cst_0 : f64
-  %1 = arith.addf %0, %arg0 : f64
-  return %1 : f64
-}
-```
-
-Constant folding, as seen above, in particular, is a very common and
-very important optimization: so much so that many language implementors
-implement constant folding support in their AST representation.
-
-The `arith` dialect provides the folding rules that allow the constant
-expression to be replaced with its result.
-
-Well, that was easy :). In practice, we recommend always using
-`OpBuilder` when generating code like this. It has no "syntactic
-overhead" for its use (you don't have to uglify your compiler with
-constant checks everywhere), and it provides the standard way to create
-and insert MLIR operations. The operations it creates can provide folding
-rules that MLIR transformations use to dramatically reduce the amount of
-IR generated in some cases (particularly for languages with a macro
-preprocessor or that use a lot of constants).
-
-On the other hand, constant folding is limited to expressions whose
-values can be determined directly. If you take a slightly more complex
-example:
-
 ```mlir
 ready> def squareSumUnoptimized(x) (1+2+x)*(x+(1+2));
 Read function definition:
@@ -76,12 +34,11 @@ func.func @squareSumUnoptimized(%arg0: f64) -> f64 {
   return %4 : f64
 }
 ```
+<!-- code-merge:end -->
 
-In this case, the LHS and RHS of the multiplication are the same value.
-We'd really like to see this generate "`tmp = x+3; result = tmp*tmp;`"
-instead of computing "`x+3`" twice.
+In this case, we could have trivially folded `1 + 2` into `3`. Furthermore, the LHS and RHS of the multiplication compute the same value. We'd really like to see this generate `tmp = x + 3; result = tmp * tmp;`.
 
-Unfortunately, no amount of local analysis will be able to detect and correct this. This requires two transformations: canonicalization to make the additions identical and Common Subexpression Elimination (CSE) to delete the redundant add operation. Fortunately, MLIR provides a broad range of optimizations that you can use, in the form of "passes".
+While constant folding can be achieved by examining each operation locally, no amount of such operation-local analysis will be able to detect and correct the duplicate computation of `x + 3`. This requires two transformations: canonicalization to make the additions identical and [Common Subexpression Elimination](https://en.wikipedia.org/wiki/Common_subexpression_elimination) (CSE) to delete the redundant add operation. Fortunately, MLIR provides a broad range of optimizations that you can use, in the form of "passes".
 
 ## MLIR Optimization Passes
 
@@ -112,12 +69,7 @@ in. A static Kaleidoscope compiler could take a simpler approach: generate
 all functions into one MLIR module, run an optimization pipeline over the
 completed module, lower it once, and emit the resulting object file.
 
-In addition to the distinction between function and module passes,
-passes can be divided into transformation and analysis passes.
-Transformation passes mutate the IR, while analysis passes compute
-information about the IR that transformations can use. MLIR manages and
-caches the analyses required by each pass, invalidating them when the IR
-changes.
+In addition to the distinction between function and module passes, MLIR distinguishes transformation passes from analyses. Transformation passes mutate the IR. Analyses are read-only computations that transformations can request. MLIR computes and caches analyses on demand, invalidating them when the IR changes.
 
 In order to get per-function optimizations going, we need to set up an
 MLIR [PassManager](https://mlir.llvm.org/docs/PassManagement/) to hold
@@ -299,6 +251,12 @@ static void HandleTopLevelExpression() {
   // Evaluate a top-level expression into an anonymous function.
   if (auto FnAST = ParseTopLevelExpr()) {
     if (auto FnIR = FnAST->codegen()) {
+      if (DumpMLIR) {
+        fprintf(stderr, "Read top-level expression:\n");
+        FnIR.print(llvm::errs(), OpPrintingFlags().assumeVerified());
+        fprintf(stderr, "\n");
+      }
+
       // Create a ResourceTracker to track JIT'd memory allocated to our
       // anonymous expression -- that way we can free it after executing.
       auto RT = TheJIT->getMainJITDylib().createResourceTracker();
@@ -478,9 +436,11 @@ We also need to update HandleDefinition and HandleExtern:
 static void HandleDefinition() {
   if (auto FnAST = ParseDefinition()) {
     if (auto FnIR = FnAST->codegen()) {
-      fprintf(stderr, "Read function definition:\n");
-      FnIR.print(llvm::errs(), OpPrintingFlags().assumeVerified());
-      fprintf(stderr, "\n");
+      if (DumpMLIR) {
+        fprintf(stderr, "Read function definition:\n");
+        FnIR.print(llvm::errs(), OpPrintingFlags().assumeVerified());
+        fprintf(stderr, "\n");
+      }
 
       ExitOnErr(TheJIT->addModule(ExitOnErr(lowerToLLVM())));
       InitializeModuleAndManagers();
@@ -495,9 +455,11 @@ static void HandleExtern() {
   if (auto ProtoAST = ParseExtern()) {
     if (auto FnIR = ProtoAST->codegen()) {
       FnIR.setPrivate();
-      fprintf(stderr, "Read extern:\n");
-      FnIR.print(llvm::errs(), OpPrintingFlags().assumeVerified());
-      fprintf(stderr, "\n");
+      if (DumpMLIR) {
+        fprintf(stderr, "Read extern:\n");
+        FnIR.print(llvm::errs(), OpPrintingFlags().assumeVerified());
+        fprintf(stderr, "\n");
+      }
       FunctionProtos[ProtoAST->getName()] = std::move(ProtoAST);
     }
   } else {
@@ -509,7 +471,7 @@ static void HandleExtern() {
 
 In `HandleDefinition`, we add two lines to transfer the newly defined function to the JIT and open a new module. In HandleExtern, we just need to add one line to add the prototype to FunctionProtos.
 
-!!!warning
+!!!note
     Duplication of symbols in separate modules is not allowed since LLVM-9. That means you can not redefine function in your Kaleidoscope JIT. The reason is that the newer OrcV2 JIT APIs are trying to stay very close to the static and dynamic linker rules, including rejecting duplicate symbols. Requiring symbol names to be unique allows us to support concurrent compilation for symbols using the (unique) symbol names as keys for tracking.
 
 With these changes made, let's try our REPL again (I removed the dump of the anonymous functions this time, you should get the idea by now :) :

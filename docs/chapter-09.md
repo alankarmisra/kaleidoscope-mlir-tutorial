@@ -444,8 +444,7 @@ clang++ -g toy.cpp `llvm-config --cxxflags --ldflags --system-libs --libs core o
 
 Here is the code:
 
-```{literalinclude} ../../../examples/Kaleidoscope/Chapter9/toy.cpp
-:language: c++
+```cpp(../code/chapter-09/toy.cpp)
 ```
 
 [Next: Conclusion and other useful LLVM tidbits](chapter-10.md)

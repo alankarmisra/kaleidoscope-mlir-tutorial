@@ -25,7 +25,12 @@ build.ninja
 .vscode/c_cpp_properties.json
 docs/llvm-compatibility.md
 
+# Local Claude files and directories
+**/*[cC][lL][aA][uU][dD][eE]*
+
 # LLVM lit output
 test/Output/
 **/test/Output/
 **/test/.lit_test_times.txt
+
+**/code_verification/

@@ -196,8 +196,8 @@ average of 3.0 and 4.0: 3.5
 
 ## Full Code Listing
 
-```{literalinclude} ../../../examples/Kaleidoscope/Chapter8/toy.cpp
-:language: c++
+```cpp(../code/chapter-08/toy.cpp)
 ```
+
 
 [Next: Adding Debug Information](chapter-09.md)

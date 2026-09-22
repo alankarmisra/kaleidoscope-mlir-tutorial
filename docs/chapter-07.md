@@ -276,7 +276,7 @@ def fib(x)
 # Iterative fib.
 def fibi(x)
   var a = 1, b = 1, c in
-  (for i = 3, i < x in
+  (for i = 3, i < x + 1 in
      c = a + b :
      a = b :
      b = c) :
@@ -284,6 +284,7 @@ def fibi(x)
 
 # Call it.
 fibi(10);
+Evaluated to 55.000000
 ```
 
 In order to mutate variables, we have to change our existing variables
@@ -865,8 +866,7 @@ clang++ -g toy.cpp `llvm-config --cxxflags --ldflags --system-libs --libs core o
 
 Here is the code:
 
-```{literalinclude} ../../../examples/Kaleidoscope/Chapter7/toy.cpp
-:language: c++
+```cpp(../code/chapter-07/toy.cpp)
 ```
 
 [Next: Compiling to Object Code](chapter-08.md)

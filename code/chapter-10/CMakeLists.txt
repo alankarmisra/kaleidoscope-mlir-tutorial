@@ -1,0 +1,92 @@
+cmake_minimum_required(VERSION 3.20)
+
+project(kaleidoscope-chapter-10 LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED YES)
+set(CMAKE_CXX_EXTENSIONS NO)
+
+find_package(MLIR REQUIRED CONFIG
+  PATHS "/Users/alankar/Documents/opensource/llvm-project/build/lib/cmake/mlir"
+  NO_DEFAULT_PATH
+)
+
+get_filename_component(KALEIDOSCOPE_LLVM_BUILD_DIR
+  "${MLIR_DIR}/../../.." ABSOLUTE)
+set(KALEIDOSCOPE_LLVM_TOOLS_DIR "${KALEIDOSCOPE_LLVM_BUILD_DIR}/bin")
+
+list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
+include(TableGen)
+include(AddMLIR)
+include_directories(${MLIR_INCLUDE_DIRS})
+
+set(LLVM_TARGET_DEFINITIONS KaleidoscopeOps.td)
+mlir_tablegen(KaleidoscopeDialect.h.inc -gen-dialect-decls
+  -dialect=kaleidoscope)
+mlir_tablegen(KaleidoscopeDialect.cpp.inc -gen-dialect-defs
+  -dialect=kaleidoscope)
+mlir_tablegen(KaleidoscopeOps.h.inc -gen-op-decls)
+mlir_tablegen(KaleidoscopeOps.cpp.inc -gen-op-defs)
+add_custom_target(KaleidoscopeOpsIncGen DEPENDS
+  KaleidoscopeDialect.h.inc
+  KaleidoscopeDialect.cpp.inc
+  KaleidoscopeOps.h.inc
+  KaleidoscopeOps.cpp.inc
+)
+
+add_executable(toy toy.cpp KaleidoscopeDialect.cpp)
+add_dependencies(toy KaleidoscopeOpsIncGen)
+
+configure_file(test/lit.site.cfg.py.in test/lit.site.cfg.py @ONLY)
+add_custom_target(check-chapter-10
+  COMMAND ${KALEIDOSCOPE_LLVM_TOOLS_DIR}/llvm-lit -sv
+          ${CMAKE_CURRENT_BINARY_DIR}/test
+  DEPENDS toy
+  USES_TERMINAL
+)
+
+# Make symbols in the executable available to the JIT for runtime lookup.
+set_target_properties(toy PROPERTIES ENABLE_EXPORTS ON)
+
+target_include_directories(toy PRIVATE
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_BINARY_DIR}
+  ${LLVM_INCLUDE_DIRS}
+  ${MLIR_INCLUDE_DIRS}
+)
+
+target_compile_definitions(toy PRIVATE ${LLVM_DEFINITIONS})
+
+if(NOT LLVM_ENABLE_RTTI)
+  target_compile_options(toy PRIVATE -fno-rtti)
+endif()
+
+llvm_map_components_to_libnames(LLVM_LIBS
+  Core
+  CodeGen
+  OrcJIT
+  Support
+  Target
+  native
+)
+
+target_link_libraries(toy PRIVATE
+  MLIRArithToLLVM
+  MLIRArithDialect
+  MLIRBuiltinToLLVMIRTranslation
+  MLIRControlFlowDialect
+  MLIRControlFlowToLLVM
+  MLIRFuncToLLVM
+  MLIRFuncDialect
+  MLIRLLVMDialect
+  MLIRLLVMIRTransforms
+  MLIRLLVMToLLVMIRTranslation
+  MLIRMemRefDialect
+  MLIRMemRefToLLVM
+  MLIRReconcileUnrealizedCasts
+  MLIRSCFDialect
+  MLIRSCFToControlFlow
+  MLIRTargetLLVMIRExport
+  MLIRTransforms
+  ${LLVM_LIBS}
+)

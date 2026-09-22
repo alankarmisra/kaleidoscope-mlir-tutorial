@@ -1,11 +1,26 @@
+#include "../include/KaleidoscopeJIT.h"
+#include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
+#include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
+#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
+#include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
+#include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/Verifier.h"
+#include "mlir/Pass/PassManager.h"
+#include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
+#include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
+#include "mlir/Target/LLVMIR/Export.h"
+#include "mlir/Transforms/Passes.h"
 #include "llvm/Support/CommandLine.h"
+#include "llvm/Support/Error.h"
+#include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cctype>
 #include <cstdio>
@@ -17,10 +32,6 @@
 #include <vector>
 
 using namespace mlir;
-
-static llvm::cl::opt<bool> DumpMLIR(
-    "dump-mlir", llvm::cl::desc("Print generated MLIR"),
-    llvm::cl::init(false));
 
 //===----------------------------------------------------------------------===//
 // Lexer
@@ -37,7 +48,14 @@ enum Token {
 
   // primary
   tok_identifier = -4,
-  tok_number = -5
+  tok_number = -5,
+
+  // control
+  tok_if = -6,
+  tok_then = -7,
+  tok_else = -8,
+  tok_for = -9,
+  tok_in = -10
 };
 
 static std::string IdentifierStr; // Filled in if tok_identifier
@@ -60,6 +78,16 @@ static int gettok() {
       return tok_def;
     if (IdentifierStr == "extern")
       return tok_extern;
+    if (IdentifierStr == "if")
+      return tok_if;
+    if (IdentifierStr == "then")
+      return tok_then;
+    if (IdentifierStr == "else")
+      return tok_else;
+    if (IdentifierStr == "for")
+      return tok_for;
+    if (IdentifierStr == "in")
+      return tok_in;
     return tok_identifier;
   }
 
@@ -150,6 +178,33 @@ public:
   CallExprAST(const std::string &Callee,
               std::vector<std::unique_ptr<ExprAST>> Args)
       : Callee(Callee), Args(std::move(Args)) {}
+
+  Value codegen() override;
+};
+
+/// IfExprAST - Expression class for if/then/else.
+class IfExprAST : public ExprAST {
+  std::unique_ptr<ExprAST> Cond, Then, Else;
+
+public:
+  IfExprAST(std::unique_ptr<ExprAST> Cond, std::unique_ptr<ExprAST> Then,
+            std::unique_ptr<ExprAST> Else)
+      : Cond(std::move(Cond)), Then(std::move(Then)), Else(std::move(Else)) {}
+
+  Value codegen() override;
+};
+
+/// ForExprAST - Expression class for for/in.
+class ForExprAST : public ExprAST {
+  std::string VarName;
+  std::unique_ptr<ExprAST> Start, End, Step, Body;
+
+public:
+  ForExprAST(const std::string &VarName, std::unique_ptr<ExprAST> Start,
+             std::unique_ptr<ExprAST> End, std::unique_ptr<ExprAST> Step,
+             std::unique_ptr<ExprAST> Body)
+      : VarName(VarName), Start(std::move(Start)), End(std::move(End)),
+        Step(std::move(Step)), Body(std::move(Body)) {}
 
   Value codegen() override;
 };
@@ -279,10 +334,86 @@ static std::unique_ptr<ExprAST> ParseIdentifierExpr() {
   return std::make_unique<CallExprAST>(IdName, std::move(Args));
 }
 
+/// ifexpr ::= 'if' expression 'then' expression 'else' expression
+static std::unique_ptr<ExprAST> ParseIfExpr() {
+  getNextToken(); // eat the if.
+
+  auto Cond = ParseExpression();
+  if (!Cond)
+    return nullptr;
+
+  if (CurTok != tok_then)
+    return LogError("expected then");
+  getNextToken(); // eat the then.
+
+  auto Then = ParseExpression();
+  if (!Then)
+    return nullptr;
+
+  if (CurTok != tok_else)
+    return LogError("expected else");
+  getNextToken(); // eat the else.
+
+  auto Else = ParseExpression();
+  if (!Else)
+    return nullptr;
+
+  return std::make_unique<IfExprAST>(std::move(Cond), std::move(Then),
+                                     std::move(Else));
+}
+
+/// forexpr ::= 'for' identifier '=' expr ',' expr (',' expr)? 'in' expression
+static std::unique_ptr<ExprAST> ParseForExpr() {
+  getNextToken(); // eat the for.
+
+  if (CurTok != tok_identifier)
+    return LogError("expected identifier after for");
+
+  std::string IdName = IdentifierStr;
+  getNextToken(); // eat identifier.
+
+  if (CurTok != '=')
+    return LogError("expected '=' after for");
+  getNextToken(); // eat '='.
+
+  auto Start = ParseExpression();
+  if (!Start)
+    return nullptr;
+  if (CurTok != ',')
+    return LogError("expected ',' after for start value");
+  getNextToken();
+
+  auto End = ParseExpression();
+  if (!End)
+    return nullptr;
+
+  // The step value is optional.
+  std::unique_ptr<ExprAST> Step;
+  if (CurTok == ',') {
+    getNextToken();
+    Step = ParseExpression();
+    if (!Step)
+      return nullptr;
+  }
+
+  if (CurTok != tok_in)
+    return LogError("expected 'in' after for");
+  getNextToken(); // eat the in.
+
+  auto Body = ParseExpression();
+  if (!Body)
+    return nullptr;
+
+  return std::make_unique<ForExprAST>(IdName, std::move(Start), std::move(End),
+                                      std::move(Step), std::move(Body));
+}
+
 /// primary
 ///   ::= identifierexpr
 ///   ::= numberexpr
 ///   ::= parenexpr
+///   ::= ifexpr
+///   ::= forexpr
 static std::unique_ptr<ExprAST> ParsePrimary() {
   switch (CurTok) {
   default:
@@ -293,6 +424,10 @@ static std::unique_ptr<ExprAST> ParsePrimary() {
     return ParseNumberExpr();
   case '(':
     return ParseParenExpr();
+  case tok_if:
+    return ParseIfExpr();
+  case tok_for:
+    return ParseForExpr();
   }
 }
 
@@ -404,12 +539,39 @@ static std::unique_ptr<PrototypeAST> ParseExtern() {
 static std::unique_ptr<MLIRContext> TheContext;
 static OwningOpRef<ModuleOp> TheModule;
 static std::unique_ptr<OpBuilder> TheBuilder;
+static std::unique_ptr<PassManager> ThePM;
 static std::map<std::string, Value> NamedValues;
+static std::unique_ptr<llvm::orc::KaleidoscopeJIT> TheJIT;
+static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos;
+static llvm::ExitOnError ExitOnErr;
+static llvm::cl::opt<bool> DumpMLIR(
+    "dump-mlir", llvm::cl::desc("Print generated MLIR"),
+    llvm::cl::init(false));
+static llvm::cl::opt<bool>
+    DumpLLVMIR("dump-llvm-ir",
+             llvm::cl::desc("Print LLVM IR before adding it to the JIT"),
+             llvm::cl::init(false));
 
 static Location getLocation() { return TheBuilder->getUnknownLoc(); }
 
 Value LogErrorV(const char *Str) {
   LogError(Str);
+  return {};
+}
+
+func::FuncOp getFunction(const std::string &Name) {
+  // First, see if the function has already been added to the current module.
+  if (auto Function = TheModule->lookupSymbol<func::FuncOp>(Name))
+    return Function;
+
+  // If not, codegen the declaration from an existing prototype.
+  auto It = FunctionProtos.find(Name);
+  if (It != FunctionProtos.end()) {
+    auto Function = It->second->codegen();
+    Function.setPrivate();
+    return Function;
+  }
+
   return {};
 }
 
@@ -453,7 +615,7 @@ Value BinaryExprAST::codegen() {
 
 Value CallExprAST::codegen() {
   // Look up the name in the global module table.
-  auto CalleeF = TheModule->lookupSymbol<func::FuncOp>(Callee);
+  auto CalleeF = getFunction(Callee);
   if (!CalleeF)
     return LogErrorV("Unknown function referenced");
 
@@ -472,6 +634,112 @@ Value CallExprAST::codegen() {
       .getResult(0);
 }
 
+Value IfExprAST::codegen() {
+  Value CondV = Cond->codegen();
+  if (!CondV)
+    return {};
+
+  // Convert the condition to a boolean by comparing it with 0.0.
+  Value Zero = TheBuilder->create<arith::ConstantOp>(
+      getLocation(), TheBuilder->getF64FloatAttr(0.0));
+  CondV = TheBuilder->create<arith::CmpFOp>(
+      getLocation(), arith::CmpFPredicate::ONE, CondV, Zero);
+
+  bool CodegenFailed = false;
+  auto IfOp = TheBuilder->create<scf::IfOp>(
+      getLocation(), CondV,
+      [&](OpBuilder &Builder, Location Loc) {
+        Value ThenV = Then->codegen();
+        if (!ThenV) {
+          CodegenFailed = true;
+          ThenV = Builder.create<arith::ConstantOp>(
+              Loc, Builder.getF64FloatAttr(0.0));
+        }
+        Builder.create<scf::YieldOp>(Loc, ThenV);
+      },
+      [&](OpBuilder &Builder, Location Loc) {
+        Value ElseV = Else->codegen();
+        if (!ElseV) {
+          CodegenFailed = true;
+          ElseV = Builder.create<arith::ConstantOp>(
+              Loc, Builder.getF64FloatAttr(0.0));
+        }
+        Builder.create<scf::YieldOp>(Loc, ElseV);
+      });
+
+  if (CodegenFailed)
+    return {};
+  return IfOp.getResult(0);
+}
+
+Value ForExprAST::codegen() {
+  // Emit the start value before putting the loop variable in scope.
+  Value StartVal = Start->codegen();
+  if (!StartVal)
+    return {};
+
+  auto OldValue = NamedValues.find(VarName);
+  bool HadOldValue = OldValue != NamedValues.end();
+  Value SavedValue = HadOldValue ? OldValue->second : Value();
+  bool CodegenFailed = false;
+
+  // The "before" region tests the loop condition. The "after" region emits
+  // the body and step, then carries the next induction value back to be tested.
+  TheBuilder->create<scf::WhileOp>(
+      getLocation(), TypeRange{TheBuilder->getF64Type()}, ValueRange{StartVal},
+      [&](OpBuilder &Builder, Location Loc, ValueRange Args) {
+        NamedValues[VarName] = Args.front();
+
+        Value EndCond = End->codegen();
+        if (!EndCond) {
+          CodegenFailed = true;
+          EndCond = Builder.create<arith::ConstantOp>(
+              Loc, Builder.getF64FloatAttr(0.0));
+        }
+
+        Value Zero = Builder.create<arith::ConstantOp>(
+            Loc, Builder.getF64FloatAttr(0.0));
+        EndCond = Builder.create<arith::CmpFOp>(Loc, arith::CmpFPredicate::ONE,
+                                                EndCond, Zero);
+        Builder.create<scf::ConditionOp>(Loc, EndCond, Args.front());
+      },
+      [&](OpBuilder &Builder, Location Loc, ValueRange Args) {
+        NamedValues[VarName] = Args.front();
+
+        if (!Body->codegen())
+          CodegenFailed = true;
+
+        Value StepVal;
+        if (Step)
+          StepVal = Step->codegen();
+        else
+          StepVal = Builder.create<arith::ConstantOp>(
+              Loc, Builder.getF64FloatAttr(1.0));
+        if (!StepVal) {
+          CodegenFailed = true;
+          StepVal = Builder.create<arith::ConstantOp>(
+              Loc, Builder.getF64FloatAttr(1.0));
+        }
+
+        Value NextVar =
+            Builder.create<arith::AddFOp>(Loc, Args.front(), StepVal);
+        Builder.create<scf::YieldOp>(Loc, NextVar);
+      });
+
+  // Restore any variable shadowed by the loop induction variable.
+  if (HadOldValue)
+    NamedValues[VarName] = SavedValue;
+  else
+    NamedValues.erase(VarName);
+
+  if (CodegenFailed)
+    return {};
+
+  // A for expression always returns 0.0.
+  return TheBuilder->create<arith::ConstantOp>(
+      getLocation(), TheBuilder->getF64FloatAttr(0.0));
+}
+
 func::FuncOp PrototypeAST::codegen() {
   // Make the function type: double(double, double), etc.
   std::vector<Type> Doubles(Args.size(), TheBuilder->getF64Type());
@@ -484,11 +752,10 @@ func::FuncOp PrototypeAST::codegen() {
 }
 
 func::FuncOp FunctionAST::codegen() {
-  // First, check for an existing function from a previous 'extern' declaration.
-  auto TheFunction = TheModule->lookupSymbol<func::FuncOp>(Proto->getName());
-
-  if (!TheFunction)
-    TheFunction = Proto->codegen();
+  // Save the prototype so declarations can be emitted in later modules.
+  auto &P = *Proto;
+  FunctionProtos[Proto->getName()] = std::move(Proto);
+  auto TheFunction = getFunction(P.getName());
 
   if (!TheFunction)
     return {};
@@ -498,6 +765,10 @@ func::FuncOp FunctionAST::codegen() {
     return {};
   }
 
+  // A definition is visible outside the module, even if an earlier extern
+  // declaration created the function with private symbol visibility.
+  TheFunction.setPublic();
+
   // Create a new basic block to start insertion into.
   Block *EntryBlock = TheFunction.addEntryBlock();
   TheBuilder->setInsertionPointToStart(EntryBlock);
@@ -506,15 +777,22 @@ func::FuncOp FunctionAST::codegen() {
   NamedValues.clear();
   unsigned Index = 0;
   for (BlockArgument Argument : TheFunction.getArguments())
-    NamedValues[Proto->getArgs()[Index++]] = Argument;
+    NamedValues[P.getArgs()[Index++]] = Argument;
 
   if (Value RetVal = Body->codegen()) {
     // Finish off the function.
     TheBuilder->create<func::ReturnOp>(getLocation(), RetVal);
 
     // Validate the generated code, checking for consistency.
-    if (succeeded(verify(TheFunction)))
+    if (succeeded(verify(TheFunction))) {
+      // Run the optimizer on the module.
+      if (failed(ThePM->run(*TheModule))) {
+        LogError("Could not optimize function.");
+        TheFunction.erase();
+        return {};
+      }
       return TheFunction;
+    }
   }
 
   // Error reading body, remove function.
@@ -526,24 +804,80 @@ func::FuncOp FunctionAST::codegen() {
 // Top-Level parsing and JIT Driver
 //===----------------------------------------------------------------------===//
 
-static void InitializeModule() {
+static void InitializeModuleAndManagers() {
+  // Destroy objects that refer to the old context before replacing it.
+  ThePM.reset();
+  TheBuilder.reset();
+  TheModule = OwningOpRef<ModuleOp>();
+  TheContext.reset();
+
   // Open a new context and module.
   TheContext = std::make_unique<MLIRContext>();
-  TheContext->loadDialect<arith::ArithDialect, func::FuncDialect>();
+  TheContext->loadDialect<arith::ArithDialect, cf::ControlFlowDialect,
+                          func::FuncDialect, scf::SCFDialect>();
   TheModule = ModuleOp::create(UnknownLoc::get(TheContext.get()));
 
   // Create a new builder for the module.
   TheBuilder = std::make_unique<OpBuilder>(TheContext.get());
+
+  // Create a pass manager and add a couple of simple optimizations.
+  ThePM = std::make_unique<PassManager>(TheContext.get());
+  ThePM->addNestedPass<func::FuncOp>(createCanonicalizerPass());
+  ThePM->addNestedPass<func::FuncOp>(createCSEPass());
+}
+
+static llvm::Expected<llvm::orc::ThreadSafeModule> lowerToLLVM() {
+  // Lower the high-level MLIR operations to the LLVM dialect.
+  PassManager LoweringPM(TheContext.get());
+  LoweringPM.addPass(createSCFToControlFlowPass());
+  LoweringPM.addPass(createConvertFuncToLLVMPass());
+  LoweringPM.addPass(createArithToLLVMConversionPass());
+  LoweringPM.addPass(createConvertControlFlowToLLVMPass());
+
+  // Clean up any temporary casts introduced by dialect conversion.
+  LoweringPM.addPass(createReconcileUnrealizedCastsPass());
+  if (failed(LoweringPM.run(*TheModule)))
+    return llvm::make_error<llvm::StringError>(
+        "could not lower module to the LLVM dialect",
+        llvm::inconvertibleErrorCode());
+
+  // Register the translations from MLIR's LLVM dialect to LLVM IR.
+  registerBuiltinDialectTranslation(*TheContext);
+  registerLLVMDialectTranslation(*TheContext);
+
+  // Translate the lowered MLIR module into an LLVM IR module. The LLVM
+  // context is kept with the module because the JIT may compile it later.
+  auto LLVMContext = std::make_unique<llvm::LLVMContext>();
+  auto LLVMModule = translateModuleToLLVMIR(*TheModule, *LLVMContext);
+  if (!LLVMModule)
+    return llvm::make_error<llvm::StringError>(
+        "could not translate the LLVM dialect to LLVM IR",
+        llvm::inconvertibleErrorCode());
+
+  // Match the module's data layout to the target selected by the JIT.
+  LLVMModule->setDataLayout(TheJIT->getDataLayout());
+
+  if (DumpLLVMIR) {
+    LLVMModule->print(llvm::errs(), nullptr);
+    llvm::errs() << '\n';
+  }
+
+  // ThreadSafeModule transfers ownership of both objects to the ORC JIT.
+  return llvm::orc::ThreadSafeModule(std::move(LLVMModule),
+                                     std::move(LLVMContext));
 }
 
 static void HandleDefinition() {
   if (auto FnAST = ParseDefinition()) {
     if (auto FnIR = FnAST->codegen()) {
       if (DumpMLIR) {
-        llvm::errs() << "Read function definition:\n";
+        fprintf(stderr, "Read function definition:\n");
         FnIR.print(llvm::errs(), OpPrintingFlags().assumeVerified());
-        llvm::errs() << '\n';
+        fprintf(stderr, "\n");
       }
+
+      ExitOnErr(TheJIT->addModule(ExitOnErr(lowerToLLVM())));
+      InitializeModuleAndManagers();
     }
   } else {
     // Skip token for error recovery.
@@ -556,10 +890,11 @@ static void HandleExtern() {
     if (auto FnIR = ProtoAST->codegen()) {
       FnIR.setPrivate();
       if (DumpMLIR) {
-        llvm::errs() << "Read extern:\n";
+        fprintf(stderr, "Read extern:\n");
         FnIR.print(llvm::errs(), OpPrintingFlags().assumeVerified());
-        llvm::errs() << '\n';
+        fprintf(stderr, "\n");
       }
+      FunctionProtos[ProtoAST->getName()] = std::move(ProtoAST);
     }
   } else {
     // Skip token for error recovery.
@@ -572,18 +907,47 @@ static void HandleTopLevelExpression() {
   if (auto FnAST = ParseTopLevelExpr()) {
     if (auto FnIR = FnAST->codegen()) {
       if (DumpMLIR) {
-        llvm::errs() << "Read top-level expression:\n";
+        fprintf(stderr, "Read top-level expression:\n");
         FnIR.print(llvm::errs(), OpPrintingFlags().assumeVerified());
-        llvm::errs() << '\n';
+        fprintf(stderr, "\n");
       }
 
-      // Remove the anonymous expression.
-      FnIR.erase();
+      auto RT = TheJIT->getMainJITDylib().createResourceTracker();
+      ExitOnErr(TheJIT->addModule(ExitOnErr(lowerToLLVM()), RT));
+      InitializeModuleAndManagers();
+
+      auto ExprSymbol = ExitOnErr(TheJIT->lookup("__anon_expr"));
+      double (*FP)() = ExprSymbol.getAddress().toPtr<double (*)()>();
+      fprintf(stderr, "Evaluated to %f\n", FP());
+
+      ExitOnErr(RT->remove());
     }
   } else {
     // Skip token for error recovery.
     getNextToken();
   }
+}
+
+//===----------------------------------------------------------------------===//
+// "Library" functions that can be "extern'd" from user code.
+//===----------------------------------------------------------------------===//
+
+#ifdef _WIN32
+#define DLLEXPORT __declspec(dllexport)
+#else
+#define DLLEXPORT
+#endif
+
+/// putchard - putchar that takes a double and returns 0.
+extern "C" DLLEXPORT double putchard(double X) {
+  fputc((char)X, stderr);
+  return 0;
+}
+
+/// printd - printf that takes a double, prints it as "%f\n", and returns 0.
+extern "C" DLLEXPORT double printd(double X) {
+  fprintf(stderr, "%f\n", X);
+  return 0;
 }
 
 /// top ::= definition | external | expression | ';'
@@ -616,7 +980,12 @@ static void MainLoop() {
 //===----------------------------------------------------------------------===//
 
 int main(int argc, char **argv) {
-  llvm::cl::ParseCommandLineOptions(argc, argv, "Kaleidoscope MLIR compiler\n");
+  llvm::cl::ParseCommandLineOptions(argc, argv, "Kaleidoscope JIT\n");
+
+  llvm::InitializeNativeTarget();
+  llvm::InitializeNativeTargetAsmPrinter();
+  llvm::InitializeNativeTargetAsmParser();
+
   // Install standard binary operators.
   // 1 is lowest precedence.
   BinopPrecedence['<'] = 10;
@@ -628,21 +997,13 @@ int main(int argc, char **argv) {
   fprintf(stderr, "ready> ");
   getNextToken();
 
-  // Make the module, which holds all the code.
-  InitializeModule();
+  TheJIT = ExitOnErr(llvm::orc::KaleidoscopeJIT::Create());
+
+  // Make the first module, which holds newly generated code.
+  InitializeModuleAndManagers();
 
   // Run the main "interpreter loop" now.
   MainLoop();
-
-  if (failed(verify(*TheModule))) {
-    fprintf(stderr, "Error: generated module failed verification\n");
-    return 1;
-  }
-
-  if (DumpMLIR) {
-    TheModule->print(llvm::errs(), OpPrintingFlags().assumeVerified());
-    llvm::errs() << '\n';
-  }
 
   return 0;
 }

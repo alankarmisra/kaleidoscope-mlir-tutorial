@@ -4,7 +4,7 @@
 
 Welcome to Chapter 5 of the "[Implementing a language with MLIR](chapter-00.md)" tutorial. Parts 1-4 described the implementation of
 the simple Kaleidoscope language and included support for generating
-LLVM IR, followed by optimizations and a JIT compiler. Unfortunately, as
+MLIR, followed by optimizations and a JIT compiler. Unfortunately, as
 presented, Kaleidoscope is mostly useless: it has no control flow other
 than call and return. This means that you can't have conditional
 branches in the code, significantly limiting its power. In this episode
@@ -15,7 +15,7 @@ if/then/else expression plus a simple 'for' loop.
 
 Extending Kaleidoscope to support if/then/else is quite straightforward.
 It basically requires adding support for this "new" concept to the
-lexer, parser, AST, and LLVM code emitter. This example is nice, because
+lexer, parser, AST, and using an additional MLIR dialect. This example is nice, because
 it shows how easy it is to "grow" a language over time, incrementally
 extending it as new ideas are discovered.
 
@@ -23,7 +23,7 @@ Before we get going on "how" we add this extension, let's talk about
 "what" we want. The basic idea is that we want to be able to write this
 sort of thing:
 
-```
+```kaleidoscope
 def fib(x)
   if x < 3 then
     1
@@ -93,7 +93,7 @@ public:
             std::unique_ptr<ExprAST> Else)
     : Cond(std::move(Cond)), Then(std::move(Then)), Else(std::move(Else)) {}
 
-  Value *codegen() override;
+  Value codegen() override;
 };
 ```
 
@@ -156,10 +156,10 @@ static std::unique_ptr<ExprAST> ParsePrimary() {
 }
 ```
 
-### LLVM IR for If/Then/Else
+### MLIR for If/Then/Else
 
 Now that we have it parsing and building the AST, the final piece is
-adding LLVM code generation support. This is the most interesting part
+adding MLIR code generation support. This is the most interesting part
 of the if/then/else example, because this is where it starts to
 introduce new concepts. All of the code above has been thoroughly
 described in previous chapters.
@@ -167,74 +167,108 @@ described in previous chapters.
 To motivate the code we want to produce, let's take a look at a simple
 example. Consider:
 
-```
+```kaleidoscope
 extern foo();
 extern bar();
 def baz(x) if x then foo() else bar();
 ```
 
-If you disable optimizations, the code you'll (soon) get from
-Kaleidoscope looks like this:
+The MLIR you’ll (soon) get from Kaleidoscope looks like this:
+
+```mlir
+ready> extern foo();
+func.func private @foo() -> f64
+ready> extern bar();
+func.func private @bar() -> f64
+ready> def baz(x) if x then foo() else bar();
+func.func @baz(%arg0: f64) -> f64 {
+  %cst = arith.constant 0.000000e+00 : f64
+  %0 = arith.cmpf one, %arg0, %cst : f64
+  %1 = scf.if %0 -> (f64) {
+    %2 = func.call @foo() : () -> f64
+    scf.yield %2 : f64
+  } else {
+    %2 = func.call @bar() : () -> f64
+    scf.yield %2 : f64
+  }
+  return %1 : f64
+}
+```
+
+To visualize the control flow graph, you can use MLIR's
+`--view-op-graph` option. Put the MLIR module into `t.mlir`, then run:
+
+```bash
+mlir-opt \
+  t.mlir \
+  --convert-scf-to-cf \
+  '--view-op-graph=print-control-flow-edges' \
+  -o /dev/null 2>&1 \
+  | perl -pe 's/style = filled/style = solid/g; s/fillcolor = "[^"]+"/fillcolor = "transparent"/g' \
+  | dot -Tsvg -Gbgcolor=transparent -Gcolor=black \
+      -Ncolor=black -Ecolor=black -o t-mlir.svg
+```
+
+The `--convert-scf-to-cf` pass first lowers `scf.if` into basic blocks
+connected by `cf.cond_br` and `cf.br` operations.
+`--view-op-graph=print-control-flow-edges` then writes a Graphviz
+representation of the operations, blocks, data-flow edges, and control-flow
+edges. The remaining commands remove the default node colors and render the
+graph as `t-mlir.svg` with a transparent background.
+
+Unlike LLVM's interactive graph-viewing helpers, this command does not open a
+window automatically. On macOS, you can open the resulting graph with:
+
+```bash
+open t-mlir.svg
+```
+
+![MLIR control-flow graph](images/t-mlir.svg)
+
+The corresponding LLVM IR dump will look like so:
 
 ```llvm
 declare double @foo()
-
 declare double @bar()
 
 define double @baz(double %x) {
 entry:
   %ifcond = fcmp one double %x, 0.000000e+00
+  ;; Compare x with 0.0, producing an i1 condition.
+
   br i1 %ifcond, label %then, label %else
+  ;; Branch to %then if the condition is true, or %else if it is false.
 
-then:       ; preds = %entry
-  %calltmp = call double @foo()
+then:
+  %thenvalue = call double @foo()
   br label %ifcont
 
-else:       ; preds = %entry
-  %calltmp1 = call double @bar()
+else:
+  %elsevalue = call double @bar()
   br label %ifcont
 
-ifcont:     ; preds = %else, %then
-  %iftmp = phi double [ %calltmp, %then ], [ %calltmp1, %else ]
+ifcont:
+  %iftmp = phi double [ %elsevalue, %else ], [ %thenvalue, %then ]
+  br label %return
+
+return:
   ret double %iftmp
 }
 ```
 
-To visualize the control flow graph, you can use a nifty feature of the
-LLVM '[opt](https://llvm.org/cmds/opt.html)' tool. If you put this LLVM
-IR into "t.ll" and run "`llvm-as < t.ll | opt -passes=view-cfg`", [a
-window will pop up](https://llvm.org/docs/ProgrammersManual.html#viewing-graphs-while-debugging-code) and you'll
-see this graph:
+!!!note
+    The LLVM IR dump normally uses numbered names such as `%0`, `%1`, and `%2`. In the listing above, we've replaced those numbers with descriptive names to make the control flow easier to follow. We've also added comments that won't appear in the actual output.
 
-:::{figure} LangImpl05-cfg.png
-:align: center
-:alt: Example CFG
+To visualize the control flow graph, you can use a nifty feature of the LLVM '[opt](https://llvm.org/cmds/opt.html)' tool. If you put this LLVM IR into "t.ll" and run "`llvm-as < t.ll | opt -passes=view-cfg`", [a window will pop up](https://llvm.org/docs/ProgrammersManual.html#viewing-graphs-while-debugging-code) and you'll see this graph:
 
-Example CFG
-:::
+![LLVM control-flow graph](images/t-llvm.svg)
 
-Another way to get this is to call "`F->viewCFG()`" or
-"`F->viewCFGOnly()`" (where F is a "`Function*`") either by
-inserting actual calls into the code and recompiling or by calling these
-in the debugger. LLVM has many nice features for visualizing various
-graphs.
+Getting back to the generated code, it is fairly simple: the entry block evaluates the conditional expression ("x" in our case here) and compares the result to 0.0 with the "`fcmp one`" instruction ('one' is "Ordered and Not Equal"). Based on the result of this expression, the code jumps to either the "then" or "else" blocks, which contain the expressions for the true/false cases.
 
-Getting back to the generated code, it is fairly simple: the entry block
-evaluates the conditional expression ("x" in our case here) and compares
-the result to 0.0 with the "`fcmp one`" instruction ('one' is "Ordered
-and Not Equal"). Based on the result of this expression, the code jumps
-to either the "then" or "else" blocks, which contain the expressions for
-the true/false cases.
-
-Once the then/else blocks are finished executing, they both branch back
-to the 'ifcont' block to execute the code that happens after the
-if/then/else. In this case the only thing left to do is to return to the
-caller of the function. The question then becomes: how does the code
-know which expression to return?
+Once the then/else blocks are finished executing, they both branch back to the 'ifcont' block to execute the code that happens after the if/then/else. In this case the only thing left to do is to return to the caller of the function. The question then becomes: how does the code know which expression to return?
 
 The answer to this question involves an important SSA operation: the
-[Phi
-operation](http://en.wikipedia.org/wiki/Static_single_assignment_form).
+[Phi operation](http://en.wikipedia.org/wiki/Static_single_assignment_form).
 If you're not familiar with SSA, [the wikipedia
 article](http://en.wikipedia.org/wiki/Static_single_assignment_form)
 is a good introduction and there are various other introductions to it
@@ -262,150 +296,102 @@ In [Chapter 7](chapter-07.md) of this tutorial ("mutable variables"),
 we'll talk about #1 in depth. For now, just believe me that you don't
 need SSA construction to handle this case. For #2, you have the choice
 of using the techniques that we will describe for #1, or you can insert
-Phi nodes directly, if convenient. In this case, it is really
-easy to generate the Phi node, so we choose to do it directly.
+Phi nodes directly, if convenient. Had we been using lower level LLVM instead of MLIR, it is really
+easy to generate the Phi node, and we would choose to do it directly.
+
+However, with MLIR, we have to do NONE of this. We use the [`scf`]() dialect and insert if/else operations and it does everything for us!
 
 Okay, enough of the motivation and overview, let's generate code!
 
 ### Code Generation for If/Then/Else
 
 In order to generate code for this, we implement the `codegen` method
-for `IfExprAST`:
+for `IfExprAST`.
+
+The first part emits the condition:
 
 ```cpp
-Value *IfExprAST::codegen() {
-  Value *CondV = Cond->codegen();
+Value IfExprAST::codegen() {
+  Value CondV = Cond->codegen();
   if (!CondV)
-    return nullptr;
+    return {};
 
-  // Convert condition to a bool by comparing non-equal to 0.0.
-  CondV = Builder->CreateFCmpONE(
-      CondV, ConstantFP::get(*TheContext, APFloat(0.0)), "ifcond");
+  // Convert the condition to a boolean by comparing it with 0.0.
+  Value Zero = TheBuilder->create<arith::ConstantOp>(
+      getLocation(), TheBuilder->getF64FloatAttr(0.0));
+  CondV = TheBuilder->create<arith::CmpFOp>(
+      getLocation(), arith::CmpFPredicate::ONE, CondV, Zero);
 ```
 
 This code is straightforward and similar to what we saw before. We emit
 the expression for the condition, then compare that value to zero to get
-a truth value as a 1-bit (bool) value.
+an `i1` truth value.
+
+With the condition emitted, we can create an
+[`scf.if`](https://mlir.llvm.org/docs/Dialects/SCFDialect/#scfif-scfifop)
+operation. The `scf` dialect represents structured control flow, allowing
+us to describe the `if` expression directly instead of constructing its
+basic blocks ourselves.
+
+The first callback passed to `scf::IfOp` builds the `then` region:
 
 ```cpp
-Function *TheFunction = Builder->GetInsertBlock()->getParent();
-
-// Create blocks for the then and else cases.  Insert the 'then' block at the
-// end of the function.
-BasicBlock *ThenBB =
-    BasicBlock::Create(*TheContext, "then", TheFunction);
-BasicBlock *ElseBB = BasicBlock::Create(*TheContext, "else");
-BasicBlock *MergeBB = BasicBlock::Create(*TheContext, "ifcont");
-
-Builder->CreateCondBr(CondV, ThenBB, ElseBB);
+  bool CodegenFailed = false;
+  auto IfOp = TheBuilder->create<scf::IfOp>(
+      getLocation(), CondV,
+      [&](OpBuilder &Builder, Location Loc) {
+        Value ThenV = Then->codegen();
+        if (!ThenV) {
+          CodegenFailed = true;
+          ThenV = Builder.create<arith::ConstantOp>(
+              Loc, Builder.getF64FloatAttr(0.0));
+        }
+        Builder.create<scf::YieldOp>(Loc, ThenV);
+      },
 ```
 
-This code creates the basic blocks that are related to the if/then/else
-statement, and correspond directly to the blocks in the example above.
-The first line gets the current Function object that is being built. It
-gets this by asking the builder for the current BasicBlock, and asking
-that block for its "parent" (the function it is currently embedded
-into).
+We recursively generate the value of the `then` expression and finish
+the region with
+[`scf.yield`](https://mlir.llvm.org/docs/Dialects/SCFDialect/#scfyield-scfyieldop).
+The yielded value becomes the result of the `scf.if` operation when its
+condition is true.
 
-Once it has that, it creates three blocks. Note that it passes
-"TheFunction" into the constructor for the "then" block. This causes the
-constructor to automatically insert the new block into the end of the
-specified function. The other two blocks are created, but aren't yet
-inserted into the function.
+Every region of an `scf.if` that produces a result must end with an
+`scf.yield` providing that result. If code generation fails, we record
+the failure and emit a temporary value so that the region remains
+structurally complete.
 
-Once the blocks are created, we can emit the conditional branch that
-chooses between them. Note that creating new blocks does not implicitly
-affect the IRBuilder, so it is still inserting into the block that the
-condition went into. Also note that it is creating a branch to the
-"then" block and the "else" block, even though the "else" block isn't
-inserted into the function yet. This is all ok: it is the standard way
-that LLVM supports forward references.
+The second callback builds the `else` region in the same way:
 
 ```cpp
-// Emit then value.
-Builder->SetInsertPoint(ThenBB);
-
-Value *ThenV = Then->codegen();
-if (!ThenV)
-  return nullptr;
-
-Builder->CreateBr(MergeBB);
-// Codegen of 'Then' can change the current block, update ThenBB for the PHI.
-ThenBB = Builder->GetInsertBlock();
+      [&](OpBuilder &Builder, Location Loc) {
+        Value ElseV = Else->codegen();
+        if (!ElseV) {
+          CodegenFailed = true;
+          ElseV = Builder.create<arith::ConstantOp>(
+              Loc, Builder.getF64FloatAttr(0.0));
+        }
+        Builder.create<scf::YieldOp>(Loc, ElseV);
+      });
 ```
 
-After the conditional branch is inserted, we move the builder to start
-inserting into the "then" block. Strictly speaking, this call moves the
-insertion point to be at the end of the specified block. However, since
-the "then" block is empty, it also starts out by inserting at the
-beginning of the block. :)
+The `then` and `else` regions must yield values of the same type. In
+Kaleidoscope, both values are doubles, so the `scf.if` operation itself
+produces a single `f64` result.
 
-Once the insertion point is set, we recursively codegen the "then"
-expression from the AST. To finish off the "then" block, we create an
-unconditional branch to the merge block. One interesting (and very
-important) aspect of the LLVM IR is that it {ref}`requires all basic
-blocks to be "terminated" <functionstructure>` with a {ref}`control
-flow instruction <terminators>` such as return or branch. This means
-that all control flow, *including fall throughs* must be made explicit
-in the LLVM IR. If you violate this rule, the verifier will emit an
-error.
-
-The final line here is quite subtle, but is very important. The basic
-issue is that when we create the Phi node in the merge block, we need to
-set up the block/value pairs that indicate how the Phi will work.
-Importantly, the Phi node expects to have an entry for each predecessor
-of the block in the CFG. Why then, are we getting the current block when
-we just set it to ThenBB 5 lines above? The problem is that the "Then"
-expression may actually itself change the block that the Builder is
-emitting into if, for example, it contains a nested "if/then/else"
-expression. Because calling `codegen()` recursively could arbitrarily change
-the notion of the current block, we are required to get an up-to-date
-value for code that will set up the Phi node.
+Finally, we check whether either region failed and return the result of
+the `scf.if` operation:
 
 ```cpp
-// Emit else block.
-TheFunction->insert(TheFunction->end(), ElseBB);
-Builder->SetInsertPoint(ElseBB);
-
-Value *ElseV = Else->codegen();
-if (!ElseV)
-  return nullptr;
-
-Builder->CreateBr(MergeBB);
-// codegen of 'Else' can change the current block, update ElseBB for the PHI.
-ElseBB = Builder->GetInsertBlock();
-```
-
-Code generation for the 'else' block is basically identical to codegen
-for the 'then' block. The only significant difference is the first line,
-which adds the 'else' block to the function. Recall previously that the
-'else' block was created, but not added to the function. Now that the
-'then' and 'else' blocks are emitted, we can finish up with the merge
-code:
-
-```cpp
-  // Emit merge block.
-  TheFunction->insert(TheFunction->end(), MergeBB);
-  Builder->SetInsertPoint(MergeBB);
-  PHINode *PN =
-    Builder->CreatePHI(Type::getDoubleTy(*TheContext), 2, "iftmp");
-
-  PN->addIncoming(ThenV, ThenBB);
-  PN->addIncoming(ElseV, ElseBB);
-  return PN;
+  if (CodegenFailed)
+    return {};
+  return IfOp.getResult(0);
 }
 ```
 
-The first two lines here are now familiar: the first adds the "merge"
-block to the Function object (it was previously floating, like the else
-block above). The second changes the insertion point so that newly
-created code will go into the "merge" block. Once that is done, we need
-to create the PHI node and set up the block/value pairs for the PHI.
-
-Finally, the CodeGen function returns the phi node as the value computed
-by the if/then/else expression. In our example above, this returned
-value will feed into the code for the top-level function, which will
-create the return instruction.
+This result is the value computed by the complete if/then/else
+expression. In our example, it is either the value returned by `foo()`
+or the value returned by `bar()`.
 
 Overall, we now have the ability to execute conditional code in
 Kaleidoscope. With this extension, Kaleidoscope is a fairly complete
@@ -419,7 +405,7 @@ Now that we know how to add basic control flow constructs to the
 language, we have the tools to add more powerful things. Let's add
 something more aggressive, a 'for' expression:
 
-```
+```kaleidoscope
 extern putchard(char);
 def printstar(n)
   for i = 1, i < n, 1.0 in
@@ -568,204 +554,201 @@ static std::unique_ptr<ExprAST> ParsePrimary() {
 }
 ```
 
-### LLVM IR for the 'for' Loop
+### MLIR and LLVM IR for the 'for' Loop
 
-Now we get to the good part: the LLVM IR we want to generate for this
-thing. With the simple example above, we get this LLVM IR (note that
-this dump is generated with optimizations disabled for clarity):
+Now we get to the good part: the MLIR we want to generate for this
+construct. With the simple example above, we get:
+
+```mlir
+func.func private @putchard(f64) -> f64
+
+func.func @printstar(%arg0: f64) -> f64 {
+  %cst = arith.constant 4.200000e+01 : f64
+  %cst_0 = arith.constant 0.000000e+00 : f64
+  %cst_1 = arith.constant 1.000000e+00 : f64
+  %0 = scf.while (%arg1 = %cst_1) : (f64) -> f64 {
+    %1 = arith.cmpf ult, %arg1, %arg0 : f64
+    scf.condition(%1) %arg1 : f64
+  } do {
+  ^bb0(%arg1: f64):
+    %1 = func.call @putchard(%cst) : (f64) -> f64
+    %2 = arith.addf %arg1, %cst_1 : f64
+    scf.yield %2 : f64
+  }
+  return %cst_0 : f64
+}
+```
+
+The loop is represented by an
+[`scf.while`](https://mlir.llvm.org/docs/Dialects/SCFDialect/#scfwhile-scfwhileop)
+operation. Its loop-carried value, `%arg1`, is the current value of the
+induction variable. It begins with `%cst_1`, which is `1.0` in this
+example.
+
+The first region tests the end condition before each iteration. The
+[`scf.condition`](https://mlir.llvm.org/docs/Dialects/SCFDialect/#scfcondition-scfconditionop)
+operation determines whether the loop continues and forwards the current
+induction value to the `do` region. Consequently, a false initial
+condition prevents the body from running at all. The `do` region emits
+the body and step, then uses
+[`scf.yield`](https://mlir.llvm.org/docs/Dialects/SCFDialect/#scfyield-scfyieldop)
+to carry the next induction value back to the condition.
+
+When this structured control flow is lowered, the loop-carried region
+argument becomes a PHI node. The automatically numbered names in the
+actual output have been replaced with descriptive names below for
+clarity:
 
 ```llvm
 declare double @putchard(double)
 
 define double @printstar(double %n) {
 entry:
-  ; initial value = 1.0 (inlined into phi)
   br label %loop
 
-loop:       ; preds = %loop, %entry
-  %i = phi double [ 1.000000e+00, %entry ], [ %nextvar, %loop ]
-  ; body
+loop:                                             ; preds = %body, %entry
+  %i = phi double [ %nextvar, %body ], [ 1.000000e+00, %entry ]
+  %loopcond = fcmp ult double %i, %n
+  br i1 %loopcond, label %body, label %afterloop
+
+body:                                             ; preds = %loop
+  %bodyi = phi double [ %i, %loop ]
   %calltmp = call double @putchard(double 4.200000e+01)
-  ; increment
-  %nextvar = fadd double %i, 1.000000e+00
+  %nextvar = fadd double %bodyi, 1.000000e+00
+  br label %loop
 
-  ; termination test
-  %cmptmp = fcmp ult double %i, %n
-  %booltmp = uitofp i1 %cmptmp to double
-  %loopcond = fcmp one double %booltmp, 0.000000e+00
-  br i1 %loopcond, label %loop, label %afterloop
-
-afterloop:      ; preds = %loop
-  ; loop always returns 0.0
+afterloop:                                        ; preds = %loop
   ret double 0.000000e+00
 }
 ```
 
-This loop contains all the same constructs we saw before: a phi node,
-several expressions, and some basic blocks. Let's see how this fits
-together.
+This loop contains the same basic blocks and PHI nodes that we saw in the
+lowered if/then/else expression. The PHI node selects `1.0` when control
+first enters the loop from `entry`, and `%nextvar` when control returns
+along the loop backedge. The condition is tested before branching to
+`body`. In the MLIR above, the `scf.while` region arguments express
+these relationships directly.
 
 ### Code Generation for the 'for' Loop
 
-The first part of codegen is very simple: we just output the start
-expression for the loop value:
+The first part of codegen is very simple: we emit the start expression
+before putting the loop variable in scope:
 
 ```cpp
-Value *ForExprAST::codegen() {
-  // Emit the start code first, without 'variable' in scope.
-  Value *StartVal = Start->codegen();
+Value ForExprAST::codegen() {
+  // Emit the start value before putting the loop variable in scope.
+  Value StartVal = Start->codegen();
   if (!StartVal)
-    return nullptr;
+    return {};
 ```
 
-With this out of the way, the next step is to set up the LLVM basic
-block for the start of the loop body. In the case above, the whole loop
-body is one block, but remember that the body code itself could consist
-of multiple blocks (e.g. if it contains an if/then/else or a for/in
-expression).
+Next, we save any existing symbol with the same name as the loop
+variable:
 
 ```cpp
-// Make the new basic block for the loop header, inserting after current
-// block.
-Function *TheFunction = Builder->GetInsertBlock()->getParent();
-BasicBlock *PreheaderBB = Builder->GetInsertBlock();
-BasicBlock *LoopBB =
-    BasicBlock::Create(*TheContext, "loop", TheFunction);
-
-// Insert an explicit fall through from the current block to the LoopBB.
-Builder->CreateBr(LoopBB);
+  auto OldValue = NamedValues.find(VarName);
+  bool HadOldValue = OldValue != NamedValues.end();
+  Value SavedValue = HadOldValue ? OldValue->second : Value();
+  bool CodegenFailed = false;
 ```
 
-This code is similar to what we saw for if/then/else. Because we will
-need it to create the Phi node, we remember the block that falls through
-into the loop. Once we have that, we create the actual block that starts
-the loop and create an unconditional branch for the fall-through between
-the two blocks.
+MLIR regions define the scope of their SSA values, but they do not
+automatically manage the `NamedValues` map used by our frontend. We
+still need that map to resolve a source-level name such as `i` while
+walking the AST. Saving its previous entry allows a loop variable to
+shadow a function argument or an enclosing loop variable without making
+the outer value inaccessible after the loop.
+
+We can now create the `scf.while` operation. Its initial loop-carried
+value is `StartVal`. The first region evaluates the condition before the
+body is entered:
 
 ```cpp
-// Start insertion in LoopBB.
-Builder->SetInsertPoint(LoopBB);
+  // The "before" region tests the loop condition. The "after" region emits
+  // the body and step, then carries the next induction value back to be tested.
+  TheBuilder->create<scf::WhileOp>(
+      getLocation(), TypeRange{TheBuilder->getF64Type()},
+      ValueRange{StartVal},
+      [&](OpBuilder &Builder, Location Loc, ValueRange Args) {
+        NamedValues[VarName] = Args.front();
 
-// Start the PHI node with an entry for Start.
-PHINode *Variable = Builder->CreatePHI(Type::getDoubleTy(*TheContext),
-                                       2, VarName);
-Variable->addIncoming(StartVal, PreheaderBB);
+        Value EndCond = End->codegen();
+        if (!EndCond) {
+          CodegenFailed = true;
+          EndCond = Builder.create<arith::ConstantOp>(
+              Loc, Builder.getF64FloatAttr(0.0));
+        }
+
+        Value Zero = Builder.create<arith::ConstantOp>(
+            Loc, Builder.getF64FloatAttr(0.0));
+        EndCond = Builder.create<arith::CmpFOp>(
+            Loc, arith::CmpFPredicate::ONE, EndCond, Zero);
+        Builder.create<scf::ConditionOp>(Loc, EndCond, Args.front());
+      },
 ```
 
-Now that the "preheader" for the loop is set up, we switch to emitting
-code for the loop body. To begin with, we move the insertion point and
-create the PHI node for the loop induction variable. Since we already
-know the incoming value for the starting value, we add it to the Phi
-node. Note that the Phi will eventually get a second value for the
-backedge, but we can't set it up yet (because it doesn't exist!).
+`Args.front()` is the current SSA value of the induction variable. We
+enter it in `NamedValues` so that the end expression can refer to the
+loop variable. The `scf.condition` operation enters the second region
+only when the condition is true, forwarding the current induction value
+to it.
+
+The second region emits the body and calculates the next value of the
+induction variable by adding the step expression, or `1.0` when no step
+was specified:
 
 ```cpp
-// Within the loop, the variable is defined equal to the PHI node.  If it
-// shadows an existing variable, we have to restore it, so save it now.
-Value *OldVal = NamedValues[VarName];
-NamedValues[VarName] = Variable;
+      [&](OpBuilder &Builder, Location Loc, ValueRange Args) {
+        NamedValues[VarName] = Args.front();
 
-// Emit the body of the loop.  This, like any other expr, can change the
-// current BB.  Note that we ignore the value computed by the body, but don't
-// allow an error.
-if (!Body->codegen())
-  return nullptr;
+        if (!Body->codegen())
+          CodegenFailed = true;
+
+        Value StepVal;
+        if (Step)
+          StepVal = Step->codegen();
+        else
+          StepVal = Builder.create<arith::ConstantOp>(
+              Loc, Builder.getF64FloatAttr(1.0));
+        if (!StepVal) {
+          CodegenFailed = true;
+          StepVal = Builder.create<arith::ConstantOp>(
+              Loc, Builder.getF64FloatAttr(1.0));
+        }
+
+        Value NextVar =
+            Builder.create<arith::AddFOp>(Loc, Args.front(), StepVal);
+        Builder.create<scf::YieldOp>(Loc, NextVar);
+      });
 ```
 
-Now the code starts to get more interesting. Our 'for' loop introduces a
-new variable to the symbol table. This means that our symbol table can
-now contain either function arguments or loop variables. To handle this,
-before we codegen the body of the loop, we add the loop variable as the
-current value for its name. Note that it is possible that there is a
-variable of the same name in the outer scope. It would be easy to make
-this an error (emit an error and return null if there is already an
-entry for VarName) but we choose to allow shadowing of variables. In
-order to handle this correctly, we remember the Value that we are
-potentially shadowing in `OldVal` (which will be null if there is no
-shadowed variable).
+The `scf.yield` operation carries `NextVar` back to the first region,
+where the condition is evaluated again. MLIR handles the blocks and
+their arguments, so we do not need to construct the loop's PHI nodes or
+backedge ourselves.
 
-Once the loop variable is set into the symbol table, the code
-recursively codegen's the body. This allows the body to use the loop
-variable: any references to it will naturally find it in the symbol
-table.
+After constructing the loop, we restore the source-level symbol that was
+shadowed, or remove the loop variable if no previous definition existed:
 
 ```cpp
-// Emit the step value.
-Value *StepVal = nullptr;
-if (Step) {
-  StepVal = Step->codegen();
-  if (!StepVal)
-    return nullptr;
-} else {
-  // If not specified, use 1.0.
-  StepVal = ConstantFP::get(*TheContext, APFloat(1.0));
-}
-
-Value *NextVar = Builder->CreateFAdd(Variable, StepVal, "nextvar");
-```
-
-Now that the body is emitted, we compute the next value of the iteration
-variable by adding the step value, or 1.0 if it isn't present.
-'`NextVar`' will be the value of the loop variable on the next
-iteration of the loop.
-
-```cpp
-// Compute the end condition.
-Value *EndCond = End->codegen();
-if (!EndCond)
-  return nullptr;
-
-// Convert condition to a bool by comparing non-equal to 0.0.
-EndCond = Builder->CreateFCmpONE(
-    EndCond, ConstantFP::get(*TheContext, APFloat(0.0)), "loopcond");
-```
-
-Finally, we evaluate the exit value of the loop, to determine whether
-the loop should exit. This mirrors the condition evaluation for the
-if/then/else statement.
-
-```cpp
-// Create the "after loop" block and insert it.
-BasicBlock *LoopEndBB = Builder->GetInsertBlock();
-BasicBlock *AfterBB =
-    BasicBlock::Create(*TheContext, "afterloop", TheFunction);
-
-// Insert the conditional branch into the end of LoopEndBB.
-Builder->CreateCondBr(EndCond, LoopBB, AfterBB);
-
-// Any new code will be inserted in AfterBB.
-Builder->SetInsertPoint(AfterBB);
-```
-
-With the code for the body of the loop complete, we just need to finish
-up the control flow for it. This code remembers the end block (for the
-phi node), then creates the block for the loop exit ("afterloop"). Based
-on the value of the exit condition, it creates a conditional branch that
-chooses between executing the loop again and exiting the loop. Any
-future code is emitted in the "afterloop" block, so it sets the
-insertion position to it.
-
-```cpp
-  // Add a new entry to the PHI node for the backedge.
-  Variable->addIncoming(NextVar, LoopEndBB);
-
-  // Restore the unshadowed variable.
-  if (OldVal)
-    NamedValues[VarName] = OldVal;
+  // Restore any variable shadowed by the loop induction variable.
+  if (HadOldValue)
+    NamedValues[VarName] = SavedValue;
   else
     NamedValues.erase(VarName);
 
-  // for expr always returns 0.0.
-  return Constant::getNullValue(Type::getDoubleTy(*TheContext));
+  if (CodegenFailed)
+    return {};
+
+  // A for expression always returns 0.0.
+  return TheBuilder->create<arith::ConstantOp>(
+      getLocation(), TheBuilder->getF64FloatAttr(0.0));
 }
 ```
 
-The final code handles various cleanups: now that we have the "NextVar"
-value, we can add the incoming value to the loop PHI node. After that,
-we remove the loop variable from the symbol table, so that it isn't in
-scope after the for loop. Finally, code generation of the for loop
-always returns 0.0, so that is what we return from
-`ForExprAST::codegen()`.
+The generated SSA value remains scoped to the `scf.while` regions, while
+restoring `NamedValues` keeps the frontend's view of source-level scope
+in sync. Finally, code generation of the for loop always returns `0.0`.
 
 With this, we conclude the "adding control flow to Kaleidoscope" chapter
 of the tutorial. In this chapter we added two control flow constructs,
@@ -788,8 +771,7 @@ clang++ -g toy.cpp `llvm-config --cxxflags --ldflags --system-libs --libs core o
 
 Here is the code:
 
-```{literalinclude} ../../../examples/Kaleidoscope/Chapter5/toy.cpp
-:language: c++
+```cpp(../code/chapter-05/toy.cpp)
 ```
 
 [Next: Extending the language: user-defined operators](chapter-06.md)
