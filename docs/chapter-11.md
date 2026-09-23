@@ -13,7 +13,7 @@ through the `arith` and `func` dialects, ran real MLIR optimization
 passes, added an interactive run-loop backed by a genuine incremental
 ORC JIT, lowered progressively through the `scf` and `llvm` dialects to
 object files, and emitted debug information for standalone executables
-- all in a bit over 1,000 lines of non-comment, non-blank code.
+- all in a compact collection of source files that you can read and change.
 
 Our little language supports a couple of interesting features: it
 supports user defined binary and unary operators, it uses JIT
@@ -24,9 +24,29 @@ right up until the point it has to become machine code.
 
 Part of the idea of this tutorial was to show you how easy and fun it
 can be to define, build, and play with languages using MLIR. Building a
-compiler need not be a scary or mystical process! Now that you've seen
-some of the basics, I strongly encourage you to take the code and hack
-on it. For example, try adding:
+compiler need not be a scary or mystical process! The compiler we built
+now has several distinct levels:
+
+```text
+Kaleidoscope source
+        ↓
+Kaleidoscope AST
+        ↓
+Kaleidoscope and standard MLIR dialects
+        ↓
+LLVM dialect
+        ↓
+LLVM IR
+        ↓
+JIT-compiled code or an object file
+```
+
+MLIR has not replaced LLVM here. It gives the frontend useful levels of
+abstraction before LLVM takes over optimization, code generation, and
+target support.
+
+Now that you've seen some of the basics, I strongly encourage you to
+take the code and hack on it. For example, try adding:
 
 - **global variables** - While global variables have questionable value
   in modern software engineering, they are often useful when putting
@@ -106,15 +126,38 @@ Discourse](https://discourse.llvm.org/c/mlir/31): both have lots of
 people who are interested in languages and are often willing to help
 out.
 
-If you'd rather keep going with Kaleidoscope itself, [Chapter
-10](chapter-10.md) is where this tutorial stops mapping LLVM concepts
-one-to-one and starts using MLIR for what it's actually for: it grows
-Kaleidoscope's own operators into a small custom dialect, showing how a
-language can carry its own semantics through the early passes instead
-of committing to `arith`/`func` immediately. That's the same idea MLIR's
-[Toy tutorial](https://mlir.llvm.org/docs/Tutorials/Toy/) takes much
-further with tensors and shape inference - if the custom-dialect chapter
-was interesting to you, Toy is the natural next stop.
+## Where to Go Next
+
+If you'd rather keep going with compiler architecture, there are several
+natural MLIR directions from here:
+
+- Expand the Kaleidoscope dialect beyond variables and initially represent
+  the complete source program in language-specific MLIR. The
+  [Toy tutorial](https://mlir.llvm.org/docs/Tutorials/Toy/) develops this
+  design much further with tensors and shape inference.
+- Add verifiers, traits, [canonicalization patterns](https://mlir.llvm.org/docs/Canonicalization/),
+  and [dialect interfaces](https://mlir.llvm.org/docs/Interfaces/) to the
+  Kaleidoscope operations. These let the dialect define what valid IR means
+  and teach generic MLIR infrastructure how its operations behave.
+- Introduce more than one lowering stage. A larger compiler does not need to
+  jump directly from its source dialect to LLVM. It can progressively lower
+  into whichever standard or project-specific dialects best express each
+  intermediate form.
+- Build more [custom passes](https://mlir.llvm.org/docs/PassManagement/).
+  Chapter 9 used one to construct debug scopes, and Chapter 10 used
+  [dialect conversion](https://mlir.llvm.org/docs/DialectConversion/) to lower
+  variables. The same pass infrastructure can implement language-specific
+  analysis and optimization while the relevant semantics are still present.
+- Target something other than LLVM. Operations that remain in higher-level,
+  target-independent dialects could instead be lowered toward GPU, SPIR-V, or
+  another backend without changing the parser or AST.
+
+LLVM remains the natural direction when you want to improve native code
+generation: inspect the translated LLVM IR, add LLVM optimization pipelines,
+extend the ORC JIT, support more ABI details, or integrate a runtime and system
+libraries. The important design decision is not whether to use MLIR *or* LLVM,
+but where each source-language concept should be lowered from one level to the
+next.
 
 Before we end this tutorial, I want to talk about some "tips and tricks"
 for generating MLIR. These are some of the more subtle things that
@@ -213,13 +256,13 @@ MLIR's answer to this is structurally different from LLVM's, and it's
 the thing this tutorial's later chapters are really about: instead of
 asking you to bolt language-specific passes onto a fixed IR, MLIR lets
 you define your own operations, types, and passes, exactly as
-[Chapter 10](chapter-10.md) does for Kaleidoscope's operators. A
-`kaleidoscope.binary` operation is not an `arith.mulf` wearing a
-disguise - it genuinely carries information ("this came from operator
-syntax, this is the `%` operator") that a lowered form can't recover.
-You get to decide how long that information survives before you convert
-it away, and you can write real canonicalization and rewrite patterns
-against it in the meantime.
+[Chapter 10](chapter-10.md) does for Kaleidoscope's variables. A
+`kaleidoscope.var` operation is not merely an allocation wearing a
+different name. It preserves the source variable's name, location, and
+argument number until lowering has enough information to create both
+its storage and its debug declaration. You get to decide how long that
+information survives before you convert it away, and you can write
+analysis and rewrite patterns against it in the meantime.
 
 This doesn't mean MLIR is immune to the same tradeoff LLVM faces once
 you *do* lower: the `arith` and `llvm` dialects use structural type
@@ -232,9 +275,10 @@ LLVM, if you have a specific need and run into a wall, the [MLIR
 Discourse](https://discourse.llvm.org/c/mlir/31) is a good place to ask.
 At the very worst, you can always treat any dialect as if it were a
 "dumb code generator" and implement the high-level optimizations you
-desire in your front-end, on the language-specific AST - exactly what
-Kaleidoscope's own `arith.constant` folding did for free back in
-[Chapter 4](chapter-04.md#trivial-constant-folding).
+desire in your front-end, on the language-specific AST. More commonly,
+you can preserve the information in MLIR and write transformations at
+the level where they make sense, just as [Chapter 4](chapter-04.md)
+used canonicalization and CSE before lowering further.
 
 ## Tips and Tricks
 
