@@ -619,7 +619,7 @@ along the way.
 
 We use the following `CMakeLists.txt` to build the example:
 
-```cmake(../code/chapter-03/CmakeLists.txt)
+```cmake(../code/chapter-04/CMakeLists.txt)
 ```
 
 The `ENABLE_EXPORTS` property makes symbols in the executable available

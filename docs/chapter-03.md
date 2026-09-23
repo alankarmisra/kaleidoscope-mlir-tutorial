@@ -563,7 +563,7 @@ instructions.
 
 We use the following `CMakeLists.txt` to build the example:
 
-```cmake(../code/chapter-03/CmakeLists.txt)
+```cmake(../code/chapter-03/CMakeLists.txt)
 ```
 
 Configure the example by setting `MLIR_DIR` to the directory containing

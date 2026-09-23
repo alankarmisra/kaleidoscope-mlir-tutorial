@@ -719,7 +719,7 @@ installment](chapter-03.md), we will describe how to generate MLIR from the AST.
 
 We use the following `CMakeLists.txt` to build the example:
 
-```cmake(../code/chapter-02/CmakeLists.txt)
+```cmake(../code/chapter-02/CMakeLists.txt)
 ```
 
 Build it with:

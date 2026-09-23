@@ -42,7 +42,7 @@ The two specific features we'll add are programmable unary operators
 (right now, Kaleidoscope has no unary operators at all) as well as
 binary operators. An example of this is:
 
-```
+```kaleidoscope
 # Logical unary not.
 def unary!(v)
   if v then
@@ -130,8 +130,8 @@ class PrototypeAST {
 public:
   PrototypeAST(const std::string &Name, std::vector<std::string> Args,
                bool IsOperator = false, unsigned Prec = 0)
-  : Name(Name), Args(std::move(Args)), IsOperator(IsOperator),
-    Precedence(Prec) {}
+      : Name(Name), Args(std::move(Args)), IsOperator(IsOperator),
+        Precedence(Prec) {}
 
   func::FuncOp codegen();
   const std::string &getName() const { return Name; }
@@ -337,7 +337,7 @@ simple: we'll add a new function to do it:
 ///   ::= primary
 ///   ::= '!' unary
 static std::unique_ptr<ExprAST> ParseUnary() {
-  // If the current token is not an operator, it must be a primary expr.
+  // If the current token is not an operator, it must be a primary expression.
   if (!isascii(CurTok) || CurTok == '(' || CurTok == ',')
     return ParsePrimary();
 
@@ -454,27 +454,26 @@ bunch of other things. For example, we can now add a nice sequencing
 operator (printd is defined to print out the specified value and a
 newline):
 
+<!-- code-merge:start -->
+```bash
+$ build/toy
 ```
+```kaleidoscope
 ready> extern printd(x);
-Read extern:
-func.func private @printd(f64) -> f64
-
 ready> def binary : 1 (x y) 0;  # Low-precedence operator that ignores operands.
-Read function definition:
-func.func @"binary:"(%arg0: f64, %arg1: f64) -> f64 {
-  %cst = arith.constant 0.000000e+00 : f64
-  return %cst : f64
-}
 ready> printd(123) : printd(456) : printd(789);
+```
+```text
 123.000000
 456.000000
 789.000000
 Evaluated to 0.000000
 ```
+<!-- code-merge:end -->
 
 We can also define a bunch of other "primitive" operations, such as:
 
-```
+```kaleidoscope
 # Logical unary not.
 def unary!(v)
   if v then
@@ -520,10 +519,9 @@ functions for I/O. For example, the following prints out a character
 whose "density" reflects the value passed in: the lower the value, the
 denser the character:
 
-```
+<!-- code-merge:start -->
+```kaleidoscope
 ready> extern putchard(char);
-Read extern:
-func.func private @putchard(f64) -> f64
 ready> def printdensity(d)
   if d > 8 then
     putchard(32)  # ' '
@@ -536,16 +534,19 @@ ready> def printdensity(d)
 ready> printdensity(1): printdensity(2): printdensity(3):
        printdensity(4): printdensity(5): printdensity(9):
        putchard(10);
+```
+```text
 **++.
 Evaluated to 0.000000
 ```
+<!-- code-merge:end -->
 
 Based on these simple primitive operations, we can start to define more
 interesting things. For example, here's a little function that determines
 the number of iterations it takes for a certain function in the complex
 plane to diverge:
 
-```
+```kaleidoscope
 # Determine whether the specific location diverges.
 # Solve for z = z^2 + c in the complex plane.
 def mandelconverger(real imag iters creal cimag)
@@ -571,7 +572,7 @@ two-dimensional plane, you can see the Mandelbrot set. Given that we are
 limited to using putchard here, our amazing graphical output is limited,
 but we can whip together something using the density plotter above:
 
-```
+```kaleidoscope
 # Compute and plot the mandelbrot set with the specified 2 dimensional range
 # info.
 def mandelhelp(xmin xmax xstep   ymin ymax ystep)
@@ -579,7 +580,7 @@ def mandelhelp(xmin xmax xstep   ymin ymax ystep)
     (for x = xmin, x < xmax, xstep in
        printdensity(mandelconverge(x,y)))
     : putchard(10)
-  )
+  );
 
 # mandel - This is a convenient helper function for plotting the mandelbrot set
 # from the specified position with the specified Magnification.
@@ -590,8 +591,11 @@ def mandel(realstart imagstart realmag imagmag)
 
 Given this, we can try plotting out the mandelbrot set! Lets try it out:
 
-```
+<!-- code-merge:start -->
+```kaleidoscope
 ready> mandel(-2.3, -1.3, 0.05, 0.07);
+```
+```text
 *******************************+++++++++++*************************************
 *************************+++++++++++++++++++++++*******************************
 **********************+++++++++++++++++++++++++++++****************************
@@ -634,7 +638,11 @@ ready> mandel(-2.3, -1.3, 0.05, 0.07);
 *******************************************************************************
 *******************************************************************************
 Evaluated to 0.000000
+```
+```kaleidoscope
 ready> mandel(-2, -1, 0.02, 0.04);
+```
+```text
 **************************+++++++++++++++++++++++++++++++++++++++++++++++++++++
 ***********************++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 *********************+++++++++++++++++++++++++++++++++++++++++++++++++++++++++.
@@ -677,7 +685,11 @@ ready> mandel(-2, -1, 0.02, 0.04);
 *******+++++++++++++++++++++++++++++++++++++++.......................
 ********+++++++++++++++++++++++++++++++++++++++++++..................
 Evaluated to 0.000000
+```
+```kaleidoscope
 ready> mandel(-0.9, -1.4, 0.02, 0.03);
+```
+```text
 *******************************************************************************
 *******************************************************************************
 *******************************************************************************
@@ -720,8 +732,11 @@ ready> mandel(-0.9, -1.4, 0.02, 0.03);
                                                                     ....+++++++
                                                                     ....+++++++
 Evaluated to 0.000000
+```
+```kaleidoscope
 ready> ^D
 ```
+<!-- code-merge:end -->
 
 At this point, you may be starting to realize that Kaleidoscope is a
 real and powerful language. It may not be self-similar :), but it can be

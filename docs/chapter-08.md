@@ -2,15 +2,16 @@
 
 ## Chapter 8 Introduction
 
-Welcome to Chapter 8 of the "[Implementing a language with LLVM](chapter-00.md)" tutorial. This chapter describes how to compile our
+Welcome to Chapter 8 of the "[Implementing a language with MLIR](chapter-00.md)" tutorial. This chapter describes how to compile our
 language down to object files.
 
 ## Choosing a target
 
-LLVM has native support for cross-compilation. You can compile to the
-architecture of your current machine, or just as easily compile for
-other architectures. In this tutorial, we'll target the current
-machine.
+Up to this point, MLIR has provided the representations and transformations used to progressively lower our source language. To produce a native object file, we now cross the boundary into LLVM’s target infrastructure. We translate our lowered MLIR module into LLVM IR, then let LLVM select the target machine and emit code for it.
+
+LLVM supports native and cross-target code generation. By default, our compiler
+targets the current machine, but object-emission mode also accepts a target
+triple through the `--target` option.
 
 To specify the architecture that you want to target, we use a string
 called a "target triple". This takes the form
@@ -21,18 +22,26 @@ triple:
 
 ```
 $ clang --version | grep Target
-Target: x86_64-unknown-linux-gnu
+Target: arm64-apple-darwin25.6.0
 ```
 
 Running this command may show something different on your machine as
 you might be using a different architecture or operating system to me.
 
-Fortunately, we don't need to hard-code a target triple to target the
-current machine. LLVM provides `sys::getDefaultTargetTriple`, which
-returns the target triple of the current machine.
+Fortunately, we don't need to hard-code a target triple. LLVM provides
+`sys::getDefaultTargetTriple`, which returns the triple of the current machine.
+We use it when the user does not supply `--target`:
 
 ```cpp
-auto TargetTriple = sys::getDefaultTargetTriple();
+static llvm::cl::opt<std::string>
+    TargetTripleOption("target",
+                       llvm::cl::desc("Target triple for object emission"),
+                       llvm::cl::value_desc("triple"), llvm::cl::init(""));
+
+std::string TargetTriple =
+    TargetTripleOption.empty()
+        ? llvm::sys::getDefaultTargetTriple()
+        : llvm::Triple::normalize(TargetTripleOption);
 ```
 
 LLVM doesn't require us to link in all the target
@@ -41,28 +50,29 @@ the assembly printers. Similarly, if we're only targeting certain
 architectures, we can only link in the functionality for those
 architectures.
 
-For this example, we'll initialize all the targets for emitting object
-code.
+Because `--target` can select a different architecture, we initialize every
+LLVM target linked into the compiler:
 
 ```cpp
-InitializeAllTargetInfos();
-InitializeAllTargets();
-InitializeAllTargetMCs();
-InitializeAllAsmParsers();
-InitializeAllAsmPrinters();
+llvm::InitializeAllTargetInfos();
+llvm::InitializeAllTargets();
+llvm::InitializeAllTargetMCs();
+llvm::InitializeAllAsmParsers();
+llvm::InitializeAllAsmPrinters();
 ```
 
 We can now use our target triple to get a `Target`:
 
 ```cpp
 std::string Error;
-auto Target = TargetRegistry::lookupTarget(TargetTriple, Error);
+const llvm::Target *Target =
+    llvm::TargetRegistry::lookupTarget(TargetTriple, Error);
 
 // Print an error and exit if we couldn't find the requested target.
 // This generally occurs if we've forgotten to initialise the
 // TargetRegistry or we have a bogus target triple.
 if (!Target) {
-  errs() << Error;
+  llvm::errs() << Error << '\n';
   return 1;
 }
 ```
@@ -74,36 +84,45 @@ machine description of the machine we're targeting. If we want to
 target a specific feature (such as SSE) or a specific CPU (such as
 Intel's Sandylake), we do so now.
 
-To see which features and CPUs that LLVM knows about, we can use
-`llc`. For example, let's look at x86:
+To see which features and CPUs LLVM knows about for the host target built into
+our LLVM installation, we can use `llc` with the triple reported by
+`llvm-config`:
 
-```
-$ llvm-as < /dev/null | llc -march=x86 -mattr=help
+```bash
+$ llvm-as < /dev/null \
+    | llc -mtriple="$(llvm-config --host-target)" -mattr=help
 Available CPUs for this target:
 
-  amdfam10      - Select the amdfam10 processor.
-  athlon        - Select the athlon processor.
-  athlon-4      - Select the athlon-4 processor.
+  a64fx         - Select the a64fx processor.
+  apple-m1      - Select the apple-m1 processor.
+  apple-m2      - Select the apple-m2 processor.
   ...
 
 Available features for this target:
 
-  16bit-mode            - 16-bit mode (i8086).
-  32bit-mode            - 32-bit mode (80386).
-  3dnow                 - Enable 3DNow! instructions.
-  3dnowa                - Enable 3DNow! Athlon instructions.
+  aes                   - Enable AES support.
+  crc                   - Enable CRC support.
+  neon                  - Enable NEON instructions.
   ...
 ```
 
-For our example, we'll use the generic CPU without any additional feature or
-target option.
+The exact list depends on which backends were enabled when LLVM was built. You
+can check them with `llvm-config --targets-built`; this tutorial's local LLVM
+build, for example, reports only `AArch64`.
+
+For our example, we'll use the generic CPU without additional target features
+and request position-independent code:
 
 ```cpp
-auto CPU = "generic";
-auto Features = "";
+llvm::TargetOptions Options;
+std::unique_ptr<llvm::TargetMachine> TargetMachine(
+    Target->createTargetMachine(llvm::Triple(TargetTriple), "generic", "",
+                                Options, llvm::Reloc::PIC_));
 
-TargetOptions opt;
-auto TargetMachine = Target->createTargetMachine(TargetTriple, CPU, Features, opt, Reloc::PIC_);
+if (!TargetMachine) {
+  llvm::errs() << "Could not create the target machine\n";
+  return 1;
+}
 ```
 
 ## Configuring the Module
@@ -115,22 +134,35 @@ this. Optimizations benefit from knowing about the target and data
 layout.
 
 ```cpp
-TheModule->setDataLayout(TargetMachine->createDataLayout());
-TheModule->setTargetTriple(TargetTriple);
+auto Lowered = ExitOnErr(lowerToLLVM(TargetMachine->createDataLayout()));
+Lowered.Module->setTargetTriple(llvm::Triple(TargetTriple));
 ```
 
 ## Emit Object Code
 
-We're ready to emit object code! Let's define where we want to write
-our file to:
+We're ready to emit object code. The conventional `-o` option lets the user
+choose the output filename. When it is omitted, we replace the input file's
+extension with `.o`, so `average.ks` produces `average.o`:
 
 ```cpp
-auto Filename = "output.o";
+static llvm::cl::opt<std::string>
+    OutputFilename("o", llvm::cl::desc("Output filename"),
+                   llvm::cl::value_desc("filename"), llvm::cl::init(""));
+
+llvm::SmallString<256> Filename;
+if (OutputFilename.empty()) {
+  Filename = InputFilename;
+  llvm::sys::path::replace_extension(Filename, "o");
+} else {
+  Filename = OutputFilename;
+}
+
 std::error_code EC;
-raw_fd_ostream dest(Filename, EC, sys::fs::OF_None);
+llvm::raw_fd_ostream Dest(Filename, EC, llvm::sys::fs::OF_None);
 
 if (EC) {
-  errs() << "Could not open file: " << EC.message();
+  llvm::errs() << "Could not open " << Filename << ": " << EC.message()
+               << '\n';
   return 1;
 }
 ```
@@ -139,16 +171,17 @@ Finally, we define a pass that emits object code, then we run that
 pass:
 
 ```cpp
-legacy::PassManager pass;
-auto FileType = CodeGenFileType::ObjectFile;
+llvm::legacy::PassManager EmitPM;
 
-if (TargetMachine->addPassesToEmitFile(pass, dest, nullptr, FileType)) {
-  errs() << "TargetMachine can't emit a file of this type";
+if (TargetMachine->addPassesToEmitFile(
+        EmitPM, Dest, nullptr, llvm::CodeGenFileType::ObjectFile)) {
+  llvm::errs() << "Target machine cannot emit an object file\n";
   return 1;
 }
 
-pass.run(*TheModule);
-dest.flush();
+EmitPM.run(*Lowered.Module);
+Dest.flush();
+llvm::outs() << "Wrote " << Filename << '\n';
 ```
 
 ## Putting It All Together
@@ -166,20 +199,28 @@ $ cmake -S . -B build \
 $ cmake --build build
 ```
 
-Let's run it, and define a simple `average` function. Press Ctrl-D
-when you're done.
+With no arguments, `toy` remains the interactive JIT REPL. Object emission is
+a separate batch mode: `--emit-object` requires a source filename, reads the
+complete file, and writes an object file without displaying REPL prompts.
 
+Save a simple `average` function in `average.ks`:
+
+```kaleidoscope
+def average(x y) (x + y) * 0.5;
 ```
-$ ./build/toy
-ready> def average(x y) (x + y) * 0.5;
-^D
-Wrote output.o
+
+Then compile it:
+
+```text
+$ ./build/toy --emit-object average.ks
+Wrote average.o
 ```
 
 We have an object file! To test it, let's write a simple program and
 link it with our output. Here's the source code:
 
 ```cpp
+// main.cpp
 #include <iostream>
 
 extern "C" {
@@ -191,14 +232,60 @@ int main() {
 }
 ```
 
-We link our program to output.o and check the result is what we
+We link our program to `average.o` and check the result is what we
 expected:
 
-```
-$ clang++ main.cpp output.o -o main
+```text
+$ clang++ main.cpp average.o -o main
 $ ./main
 average of 3.0 and 4.0: 3.5
 ```
+
+On macOS, if `clang++` cannot find the standard library headers, run the link
+command through Xcode's toolchain wrapper instead:
+
+```text
+xcrun clang++ main.cpp average.o -o main
+```
+
+## Output Names and Cross-Compilation
+
+The default command above builds `average.o` for the current machine. Use `-o`
+when you want a different output path:
+
+```text
+$ ./build/toy --emit-object average.ks -o result.o
+Wrote result.o
+```
+
+To request a different target, supply its triple:
+
+```text
+$ ./build/toy --emit-object average.ks \
+    --target=aarch64-unknown-linux-gnu
+Wrote average.o
+```
+
+You can inspect the emitted object with `llvm-readobj`:
+
+```text
+$ llvm-readobj --file-headers average.o
+
+File: average.o
+Format: elf64-littleaarch64
+Arch: aarch64
+AddressSize: 64bit
+LoadName: <Not found>
+ElfHeader {
+  ...
+}
+```
+
+Here the output confirms that LLVM emitted an AArch64 ELF object rather than a
+native macOS object. Producing an object for another target does not by itself
+provide that target's linker, system libraries, or sysroot; those are still
+needed to link the object into a complete executable. The requested backend
+must also be present in the LLVM build used to compile `toy`.
 
 ## Full Code Listing
 

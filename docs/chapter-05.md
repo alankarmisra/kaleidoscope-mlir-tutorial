@@ -177,10 +177,13 @@ The MLIR you’ll (soon) get from Kaleidoscope looks like this:
 
 ```mlir
 ready> extern foo();
+Read extern:
 func.func private @foo() -> f64
 ready> extern bar();
+Read extern:
 func.func private @bar() -> f64
 ready> def baz(x) if x then foo() else bar();
+Read function definition:
 func.func @baz(%arg0: f64) -> f64 {
   %cst = arith.constant 0.000000e+00 : f64
   %0 = arith.cmpf one, %arg0, %cst : f64
@@ -195,37 +198,8 @@ func.func @baz(%arg0: f64) -> f64 {
 }
 ```
 
-To visualize the control flow graph, you can use MLIR's
-`--view-op-graph` option. Put the MLIR module into `t.mlir`, then run:
+So far, we've been looking only at the MLIR dump for our code generation. We will now descend into the LLVM IR to understand a few useful concepts such as the `Phi node`. It's not something you'll deal with directly right now, but it is something that, as a compiler engineer, you need to be aware of. SO here's an LLVM IR dum of our code. 
 
-```bash
-mlir-opt \
-  t.mlir \
-  --convert-scf-to-cf \
-  '--view-op-graph=print-control-flow-edges' \
-  -o /dev/null 2>&1 \
-  | perl -pe 's/style = filled/style = solid/g; s/fillcolor = "[^"]+"/fillcolor = "transparent"/g' \
-  | dot -Tsvg -Gbgcolor=transparent -Gcolor=black \
-      -Ncolor=black -Ecolor=black -o t-mlir.svg
-```
-
-The `--convert-scf-to-cf` pass first lowers `scf.if` into basic blocks
-connected by `cf.cond_br` and `cf.br` operations.
-`--view-op-graph=print-control-flow-edges` then writes a Graphviz
-representation of the operations, blocks, data-flow edges, and control-flow
-edges. The remaining commands remove the default node colors and render the
-graph as `t-mlir.svg` with a transparent background.
-
-Unlike LLVM's interactive graph-viewing helpers, this command does not open a
-window automatically. On macOS, you can open the resulting graph with:
-
-```bash
-open t-mlir.svg
-```
-
-![MLIR control-flow graph](images/t-mlir.svg)
-
-The corresponding LLVM IR dump will look like so:
 
 ```llvm
 declare double @foo()
@@ -259,11 +233,7 @@ return:
 !!!note
     The LLVM IR dump normally uses numbered names such as `%0`, `%1`, and `%2`. In the listing above, we've replaced those numbers with descriptive names to make the control flow easier to follow. We've also added comments that won't appear in the actual output.
 
-To visualize the control flow graph, you can use a nifty feature of the LLVM '[opt](https://llvm.org/cmds/opt.html)' tool. If you put this LLVM IR into "t.ll" and run "`llvm-as < t.ll | opt -passes=view-cfg`", [a window will pop up](https://llvm.org/docs/ProgrammersManual.html#viewing-graphs-while-debugging-code) and you'll see this graph:
-
-![LLVM control-flow graph](images/t-llvm.svg)
-
-Getting back to the generated code, it is fairly simple: the entry block evaluates the conditional expression ("x" in our case here) and compares the result to 0.0 with the "`fcmp one`" instruction ('one' is "Ordered and Not Equal"). Based on the result of this expression, the code jumps to either the "then" or "else" blocks, which contain the expressions for the true/false cases.
+The generated code is fairly simple: the entry block evaluates the conditional expression ("x" in our case here) and compares the result to 0.0 with the "`fcmp one`" instruction ('one' is "Ordered and Not Equal"). Based on the result of this expression, the code jumps to either the "then" or "else" blocks, which contain the expressions for the true/false cases. 
 
 Once the then/else blocks are finished executing, they both branch back to the 'ifcont' block to execute the code that happens after the if/then/else. In this case the only thing left to do is to return to the caller of the function. The question then becomes: how does the code know which expression to return?
 
@@ -278,6 +248,11 @@ control came from. The Phi operation takes on the value corresponding to
 the input control block. In this case, if control comes in from the
 "then" block, it gets the value of "calltmp". If control comes from the
 "else" block, it gets the value of "calltmp1".
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/t-llvm-gray.svg">
+  <img src="images/t-llvm.svg" alt="LLVM control-flow graph">
+</picture>
 
 At this point, you are probably starting to think "Oh no! This means my
 simple and elegant front-end will have to start generating SSA form in
@@ -472,7 +447,7 @@ public:
     : VarName(VarName), Start(std::move(Start)), End(std::move(End)),
       Step(std::move(Step)), Body(std::move(Body)) {}
 
-  Value *codegen() override;
+  Value codegen() override;
 };
 ```
 
@@ -757,16 +732,98 @@ important for front-end implementors to know. In the next chapter of our
 saga, we will get a bit crazier and add [user-defined
 operators](chapter-06.md) to our poor innocent language.
 
+## Control Flow Graph Visualization Tools
+
+To visualize the control flow graph, you can use MLIR's
+`--view-op-graph` option. The output above shows one REPL interaction at a
+time, so it is not quite a standalone MLIR file. Save the complete module below
+as `t.mlir`:
+
+```mlir
+module {
+  func.func private @foo() -> f64
+  func.func private @bar() -> f64
+
+  func.func @baz(%arg0: f64) -> f64 {
+    %cst = arith.constant 0.000000e+00 : f64
+    %0 = arith.cmpf one, %arg0, %cst : f64
+    %1 = scf.if %0 -> (f64) {
+      %2 = func.call @foo() : () -> f64
+      scf.yield %2 : f64
+    } else {
+      %2 = func.call @bar() : () -> f64
+      scf.yield %2 : f64
+    }
+    return %1 : f64
+  }
+}
+```
+
+Then run:
+
+```bash
+mlir-opt \
+  t.mlir \
+  --convert-scf-to-cf \
+  '--view-op-graph=print-control-flow-edges' \
+  -o /dev/null 2>&1 \
+  | perl -pe 's/style = filled/style = solid/g; s/fillcolor = "[^"]+"/fillcolor = "transparent"/g' \
+  > t-mlir.dot
+
+dot -Tsvg -Gbgcolor=transparent \
+  -Gcolor=black -Gfontcolor=black \
+  -Ncolor=black -Nfontcolor=black \
+  -Ecolor=black -Efontcolor=black \
+  -o t-mlir.svg t-mlir.dot
+
+dot -Tsvg -Gbgcolor=transparent \
+  -Gcolor=gray -Gfontcolor=gray \
+  -Ncolor=gray -Nfontcolor=gray \
+  -Ecolor=gray -Efontcolor=gray \
+  -o t-mlir-gray.svg t-mlir.dot
+```
+
+The `--convert-scf-to-cf` pass first lowers `scf.if` into basic blocks
+connected by `cf.cond_br` and `cf.br` operations.
+`--view-op-graph=print-control-flow-edges` then writes a Graphviz
+representation of the operations, blocks, data-flow edges, and control-flow
+edges. The remaining commands remove the default node colors and render two
+graphs with transparent backgrounds: a black version for light mode and a gray
+version that remains visible in dark mode.
+
+On macOS, you can open the resulting graph with:
+
+```bash
+open t-mlir.svg
+```
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/t-mlir-gray.svg">
+  <img src="images/t-mlir.svg" alt="MLIR control-flow graph">
+</picture>
+
+To visualize the control flow graph for LLVM IR, you can use a nifty feature of the LLVM '[opt](https://llvm.org/cmds/opt.html)' tool. If you put this LLVM IR into "t.ll" and run "`llvm-as < t.ll | opt -passes=view-cfg`", [a window will pop up](https://llvm.org/docs/ProgrammersManual.html#viewing-graphs-while-debugging-code) and you'll see this graph:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/t-llvm-gray.svg">
+  <img src="images/t-llvm.svg" alt="LLVM control-flow graph">
+</picture>
+
 ## Full Code Listing
 
 Here is the complete code listing for our running example, enhanced with
-the if/then/else and for expressions. To build this example, use:
+the if/then/else and for expressions. Here is the CMake configuration:
+
+```cmake(../code/chapter-05/CMakeLists.txt)
+```
+
+To build this example, use:
 
 ```bash
-# Compile
-clang++ -g toy.cpp `llvm-config --cxxflags --ldflags --system-libs --libs core orcjit native` -O3 -o toy
-# Run
-./toy
+cmake -S . -B build \
+  -DMLIR_DIR=/path/to/llvm-project/build/lib/cmake/mlir
+cmake --build build
+./build/toy
 ```
 
 Here is the code:

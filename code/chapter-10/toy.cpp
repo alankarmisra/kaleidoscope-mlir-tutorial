@@ -9,6 +9,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/ControlFlow/IR/ControlFlowOps.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
 #include "mlir/Dialect/LLVMIR/Transforms/Passes.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -24,16 +25,16 @@
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Transforms/Passes.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/BinaryFormat/Dwarf.h"
-#include "llvm/IR/DIBuilder.h"
 #include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/Instructions.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
@@ -43,7 +44,6 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
-#include <iterator>
 #include <map>
 #include <memory>
 #include <optional>
@@ -301,8 +301,7 @@ public:
 };
 
 /// PrototypeAST - This class represents the "prototype" for a function,
-/// which captures its name, and its argument names (thus implicitly the number
-/// of arguments the function takes).
+/// which captures its argument names as well as if it is an operator.
 class PrototypeAST {
   std::string Name;
   std::vector<std::string> Args;
@@ -768,9 +767,22 @@ static llvm::cl::opt<bool> DumpMLIR(
     llvm::cl::init(false));
 static llvm::cl::opt<bool>
     EmitObject("emit-object",
-               llvm::cl::desc("Compile all input to output.o instead of using "
-                              "the JIT"),
+               llvm::cl::desc(
+                   "Compile an input file to an object instead of using the JIT"),
                llvm::cl::init(false));
+static llvm::cl::opt<std::string>
+    InputFilename(llvm::cl::Positional, llvm::cl::desc("<input file>"),
+                  llvm::cl::init(""));
+static llvm::cl::opt<std::string>
+    TargetTripleOption("target",
+                       llvm::cl::desc("Target triple for object emission"),
+                       llvm::cl::value_desc("triple"), llvm::cl::init(""));
+static llvm::cl::opt<std::string>
+    OutputFilename("o", llvm::cl::desc("Output filename"),
+                   llvm::cl::value_desc("filename"), llvm::cl::init(""));
+static llvm::cl::opt<char>
+    OptLevel("O", llvm::cl::desc("Optimization level: -O0, -O1, -O2, or -O3"),
+             llvm::cl::Prefix, llvm::cl::init('2'));
 static llvm::cl::opt<bool>
     DumpLLVMIR("dump-llvm-ir",
              llvm::cl::desc("Print LLVM IR before emitting the object file"),
@@ -779,7 +791,10 @@ static llvm::cl::opt<bool>
 static SourceLocation CodegenLoc = {1, 1};
 
 static Location getLocation() {
-  return FileLineColLoc::get(TheContext.get(), "fib.ks", CodegenLoc.Line,
+  llvm::StringRef Filename = "<stdin>";
+  if (!InputFilename.empty())
+    Filename = InputFilename.getValue();
+  return FileLineColLoc::get(TheContext.get(), Filename, CodegenLoc.Line,
                              CodegenLoc.Col);
 }
 
@@ -1170,10 +1185,12 @@ static void InitializeModuleAndManagers() {
   // Create a new builder for the module.
   TheBuilder = std::make_unique<OpBuilder>(TheContext.get());
 
-  // Create a pass manager and add a couple of simple optimizations.
+  // Create a pass manager and enable our simple optimizations above -O0.
   ThePM = std::make_unique<PassManager>(TheContext.get());
-  ThePM->addNestedPass<func::FuncOp>(createCanonicalizerPass());
-  ThePM->addNestedPass<func::FuncOp>(createCSEPass());
+  if (OptLevel != '0') {
+    ThePM->addNestedPass<func::FuncOp>(createCanonicalizerPass());
+    ThePM->addNestedPass<func::FuncOp>(createCSEPass());
+  }
 }
 
 struct LoweredModule {
@@ -1253,66 +1270,137 @@ public:
 };
 } // namespace
 
-static void addParameterDebugInfo(llvm::Module &Module) {
-  auto *CompileUnits = Module.getNamedMetadata("llvm.dbg.cu");
-  if (!CompileUnits || CompileUnits->getNumOperands() == 0)
-    return;
+static Value findUnderlyingAlloca(Value V) {
+  Operation *DefiningOp = V.getDefiningOp();
+  if (!DefiningOp)
+    return {};
+  if (isa<LLVM::AllocaOp>(DefiningOp))
+    return V;
+  for (Value Operand : DefiningOp->getOperands())
+    if (Value Alloca = findUnderlyingAlloca(Operand))
+      return Alloca;
+  return {};
+}
 
-  auto *CompileUnit =
-      llvm::dyn_cast<llvm::DICompileUnit>(CompileUnits->getOperand(0));
-  if (!CompileUnit)
-    return;
+static void addDebugInfoScopes(ModuleOp Module) {
+  MLIRContext *Context = Module.getContext();
+  llvm::StringRef InputPath = InputFilename.getValue();
+  auto File = InputPath.empty()
+                  ? LLVM::DIFileAttr::get(Context, "<stdin>", "")
+                  : LLVM::DIFileAttr::get(
+                        Context, llvm::sys::path::filename(InputPath),
+                        llvm::sys::path::parent_path(InputPath));
+  auto CompileUnit = LLVM::DICompileUnitAttr::get(
+      DistinctAttr::create(UnitAttr::get(Context)), llvm::dwarf::DW_LANG_C,
+      File, StringAttr::get(Context, "Kaleidoscope"),
+      /*isOptimized=*/OptLevel != '0', LLVM::DIEmissionKind::Full);
+  Module->setLoc(FusedLoc::get(Context, {Module.getLoc()}, CompileUnit));
 
-  llvm::DIBuilder DebugBuilder(Module, true, CompileUnit);
-  auto *DoubleType = DebugBuilder.createBasicType(
-      "double", 64, llvm::dwarf::DW_ATE_float);
+  for (LLVM::LLVMFuncOp Function : Module.getOps<LLVM::LLVMFuncOp>()) {
+    Location OriginalLoc = Function.getLoc();
+    LLVM::DIFileAttr FunctionFile = File;
+    int64_t Line = 1;
+    if (auto FileLoc = OriginalLoc->findInstanceOf<FileLineColLoc>()) {
+      llvm::StringRef FunctionPath = FileLoc.getFilename().getValue();
+      FunctionFile = LLVM::DIFileAttr::get(
+          Context, llvm::sys::path::filename(FunctionPath),
+          llvm::sys::path::parent_path(FunctionPath));
+      Line = FileLoc.getLine();
+    }
 
-  for (llvm::Function &Function : Module) {
+    DistinctAttr Id;
+    LLVM::DICompileUnitAttr FunctionCompileUnit = CompileUnit;
+    auto Flags = static_cast<LLVM::DISubprogramFlags>(0);
+    if (OptLevel != '0')
+      Flags = Flags | LLVM::DISubprogramFlags::Optimized;
+    if (Function.isExternal()) {
+      FunctionCompileUnit = {};
+    } else {
+      Id = DistinctAttr::create(UnitAttr::get(Context));
+      Flags = Flags | LLVM::DISubprogramFlags::Definition;
+    }
+
+    auto FunctionType = LLVM::DISubroutineTypeAttr::get(
+        Context, llvm::dwarf::DW_CC_normal, {});
+    auto Name = Function.getNameAttr();
+    auto Scope = LLVM::DISubprogramAttr::get(
+        Context, Id, FunctionCompileUnit, FunctionFile, Name, Name,
+        FunctionFile, Line, Line, Flags, FunctionType,
+        /*retainedNodes=*/{}, /*annotations=*/{});
+    Function->setLoc(FusedLoc::get(Context, {OriginalLoc}, Scope));
+  }
+}
+
+static void addParameterDebugInfo(ModuleOp Module) {
+  // Get the context used to create LLVM dialect debug attributes.
+  MLIRContext *Context = Module.getContext();
+  // Describe every Kaleidoscope parameter as a 64-bit DWARF double.
+  auto DoubleType = LLVM::DIBasicTypeAttr::get(
+      Context, llvm::dwarf::DW_TAG_base_type, "double", 64,
+      llvm::dwarf::DW_ATE_float);
+  // Use each variable's address directly, without a DWARF transformation.
+  auto EmptyExpression = LLVM::DIExpressionAttr::get(Context);
+
+  // Add parameter information to every lowered LLVM function in the module.
+  for (LLVM::LLVMFuncOp Function : Module.getOps<LLVM::LLVMFuncOp>()) {
+    // Recover the source parameter names saved before lowering.
     auto Names = FunctionParameters.find(Function.getName().str());
-    llvm::DISubprogram *Scope = Function.getSubprogram();
-    if (Function.isDeclaration() || Names == FunctionParameters.end() ||
-        !Scope)
+    // Declarations have no body, and some functions may have no saved names.
+    if (Function.isExternal() || Names == FunctionParameters.end())
       continue;
 
-    llvm::DIFile *File = Scope->getFile();
-    unsigned Line = Scope->getLine();
-    unsigned ArgumentNumber = 0;
-    for (llvm::Argument &Argument : Function.args()) {
-      if (ArgumentNumber >= Names->second.size())
+    // Find the function's debug scope, attached before the debug-scope pass.
+    auto ScopeLoc = Function.getLoc()
+                        ->findInstanceOf<
+                            FusedLocWith<LLVM::DISubprogramAttr>>();
+    // A variable cannot be declared without a containing function scope.
+    if (!ScopeLoc)
+      continue;
+
+    // Extract the function description attached to its fused location.
+    LLVM::DISubprogramAttr Scope = ScopeLoc.getMetadata();
+
+    // Lowered function parameters are arguments of the entry block.
+    Block &EntryBlock = Function.getBody().front();
+    // Pair each zero-based block argument with its saved source name.
+    for (auto [ArgumentNumber, Name] : llvm::enumerate(Names->second)) {
+      // Stop if the saved parameter list is longer than the lowered list.
+      if (ArgumentNumber >= EntryBlock.getNumArguments())
         break;
 
-      // Mutable parameters are copied into stack storage during memref
-      // lowering. Find that store and describe its destination as the source
-      // variable's address.
-      llvm::StoreInst *ArgumentStore = nullptr;
-      for (llvm::Instruction &Instruction : Function.getEntryBlock()) {
-        auto *Store = llvm::dyn_cast<llvm::StoreInst>(&Instruction);
-        if (Store && Store->getValueOperand() == &Argument) {
+      // Get the SSA value holding the incoming parameter.
+      BlockArgument Argument = EntryBlock.getArgument(ArgumentNumber);
+      // Find the store that copies this value into mutable stack storage.
+      LLVM::StoreOp ArgumentStore;
+      for (LLVM::StoreOp Store : EntryBlock.getOps<LLVM::StoreOp>()) {
+        // The matching store uses the block argument as its stored value.
+        if (Store.getValue() == Argument) {
           ArgumentStore = Store;
           break;
         }
       }
-      if (!ArgumentStore) {
-        ++ArgumentNumber;
+      // A parameter without stack storage cannot use dbg.declare here.
+      if (!ArgumentStore)
         continue;
-      }
 
-      auto *Variable = DebugBuilder.createParameterVariable(
-          Scope, Names->second[ArgumentNumber], ArgumentNumber + 1, File, Line,
-          DoubleType, true);
-      auto InsertPoint = std::next(ArgumentStore->getIterator());
-      DebugBuilder.insertDeclare(
-          ArgumentStore->getPointerOperand(), Variable,
-          DebugBuilder.createExpression(),
-          llvm::DILocation::get(Module.getContext(), Line, 0, Scope),
-          InsertPoint);
-      ++ArgumentNumber;
+      // Describe the parameter's name, scope, position, and type to DWARF.
+      auto Variable = LLVM::DILocalVariableAttr::get(
+          Scope, Name, Scope.getFile(), Scope.getLine(), ArgumentNumber + 1,
+          /*alignInBits=*/0, DoubleType, LLVM::DIFlags::Zero);
+      // Recover the actual allocation hidden by the lowered memref descriptor.
+      Value VariableAddress = findUnderlyingAlloca(ArgumentStore.getAddr());
+      // Fall back to the store address if no underlying alloca was found.
+      if (!VariableAddress)
+        VariableAddress = ArgumentStore.getAddr();
+      // Insert the debug declaration immediately after the initial store.
+      OpBuilder Builder(ArgumentStore);
+      Builder.setInsertionPointAfter(ArgumentStore);
+      // Associate the source parameter description with its stack address.
+      Builder.create<LLVM::DbgDeclareOp>(ArgumentStore.getLoc(),
+                                         VariableAddress, Variable,
+                                         EmptyExpression);
     }
-
-    DebugBuilder.finalizeSubprogram(Scope);
   }
-
-  DebugBuilder.finalize();
 }
 
 static llvm::Expected<LoweredModule>
@@ -1328,16 +1416,27 @@ lowerToLLVM(const llvm::DataLayout &DataLayout) {
 
   // Clean up any temporary casts introduced by dialect conversion.
   LoweringPM.addPass(createReconcileUnrealizedCastsPass());
-  // Give each llvm.func a debug scope so FileLineColLoc locations translate
-  // into LLVM line-table metadata.
-  LLVM::DIScopeForLLVMFuncOpPassOptions DebugOptions;
-  DebugOptions.emissionKind = LLVM::DIEmissionKind::Full;
-  LoweringPM.addPass(
-      LLVM::createDIScopeForLLVMFuncOpPass(std::move(DebugOptions)));
   if (failed(LoweringPM.run(*TheModule)))
     return llvm::make_error<llvm::StringError>(
         "could not lower module to the LLVM dialect",
         llvm::inconvertibleErrorCode());
+
+  // Create optimization-aware compile-unit and function scopes before asking
+  // MLIR to add the remaining scope information to operation locations.
+  addDebugInfoScopes(*TheModule);
+  LLVM::DIScopeForLLVMFuncOpPassOptions DebugOptions;
+  DebugOptions.emissionKind = LLVM::DIEmissionKind::Full;
+  PassManager DebugPM(TheContext.get());
+  DebugPM.addPass(
+      LLVM::createDIScopeForLLVMFuncOpPass(std::move(DebugOptions)));
+  if (failed(DebugPM.run(*TheModule)))
+    return llvm::make_error<llvm::StringError>(
+        "could not add LLVM debug scopes",
+        llvm::inconvertibleErrorCode());
+
+  // Describe source parameters in the LLVM dialect while their lowered stack
+  // storage and MLIR debug scopes are still available.
+  addParameterDebugInfo(*TheModule);
 
   // Register the translations from MLIR's LLVM dialect to LLVM IR.
   registerBuiltinDialectTranslation(*TheContext);
@@ -1353,7 +1452,6 @@ lowerToLLVM(const llvm::DataLayout &DataLayout) {
         llvm::inconvertibleErrorCode());
 
   LLVMModule->setDataLayout(DataLayout);
-  addParameterDebugInfo(*LLVMModule);
 
   if (DumpLLVMIR) {
     LLVMModule->print(llvm::errs(), nullptr);
@@ -1464,7 +1562,8 @@ static void MainLoop() {
     case tok_eof:
       return;
     case ';': // ignore top-level semicolons.
-      fprintf(stderr, "ready> ");
+      if (!EmitObject)
+        fprintf(stderr, "ready> ");
       getNextToken();
       continue;
     case tok_def:
@@ -1477,7 +1576,7 @@ static void MainLoop() {
       HandleTopLevelExpression();
       break;
     }
-    if (CurTok != tok_eof && CurTok != ';')
+    if (!EmitObject && CurTok != tok_eof && CurTok != ';')
       fprintf(stderr, "ready> ");
   }
 }
@@ -1490,9 +1589,37 @@ int main(int argc, char **argv) {
   llvm::cl::ParseCommandLineOptions(argc, argv,
                                     "Kaleidoscope object file compiler\n");
 
-  llvm::InitializeNativeTarget();
-  llvm::InitializeNativeTargetAsmPrinter();
-  llvm::InitializeNativeTargetAsmParser();
+  if (OptLevel < '0' || OptLevel > '3') {
+    llvm::errs() << "Error: optimization level must be -O0, -O1, -O2, or -O3\n";
+    return 1;
+  }
+
+  if (EmitObject && InputFilename.empty()) {
+    llvm::errs() << "Error: --emit-object requires an input file\n";
+    return 1;
+  }
+  if (!EmitObject && !InputFilename.empty()) {
+    llvm::errs() << "Error: an input file requires --emit-object\n";
+    return 1;
+  }
+  if (!EmitObject && !TargetTripleOption.empty()) {
+    llvm::errs() << "Error: --target requires --emit-object\n";
+    return 1;
+  }
+  if (!EmitObject && !OutputFilename.empty()) {
+    llvm::errs() << "Error: -o requires --emit-object\n";
+    return 1;
+  }
+  if (EmitObject && !std::freopen(InputFilename.c_str(), "r", stdin)) {
+    std::perror(("Error opening " + InputFilename).c_str());
+    return 1;
+  }
+
+  llvm::InitializeAllTargetInfos();
+  llvm::InitializeAllTargets();
+  llvm::InitializeAllTargetMCs();
+  llvm::InitializeAllAsmParsers();
+  llvm::InitializeAllAsmPrinters();
 
   // Install standard binary operators.
   // 1 is lowest precedence.
@@ -1503,7 +1630,8 @@ int main(int argc, char **argv) {
   BinopPrecedence['*'] = 40; // highest.
 
   // Prime the first token.
-  fprintf(stderr, "ready> ");
+  if (!EmitObject)
+    fprintf(stderr, "ready> ");
   getNextToken();
 
   if (!EmitObject)
@@ -1520,7 +1648,10 @@ int main(int argc, char **argv) {
     return 0;
 
   // Select the host target and configure its object-file emitter.
-  auto TargetTriple = llvm::sys::getDefaultTargetTriple();
+  std::string TargetTriple =
+      TargetTripleOption.empty()
+          ? llvm::sys::getDefaultTargetTriple()
+          : llvm::Triple::normalize(TargetTripleOption);
   std::string Error;
   const llvm::Target *Target =
       llvm::TargetRegistry::lookupTarget(TargetTriple, Error);
@@ -1530,9 +1661,17 @@ int main(int argc, char **argv) {
   }
 
   llvm::TargetOptions Options;
+  llvm::CodeGenOptLevel CodeGenOpt;
+  switch (OptLevel) {
+  case '0': CodeGenOpt = llvm::CodeGenOptLevel::None; break;
+  case '1': CodeGenOpt = llvm::CodeGenOptLevel::Less; break;
+  case '2': CodeGenOpt = llvm::CodeGenOptLevel::Default; break;
+  case '3': CodeGenOpt = llvm::CodeGenOptLevel::Aggressive; break;
+  }
   std::unique_ptr<llvm::TargetMachine> TargetMachine(
       Target->createTargetMachine(llvm::Triple(TargetTriple), "generic", "",
-                                  Options, llvm::Reloc::PIC_));
+                                  Options, llvm::Reloc::PIC_, std::nullopt,
+                                  CodeGenOpt));
   if (!TargetMachine) {
     llvm::errs() << "Could not create the target machine\n";
     return 1;
@@ -1543,11 +1682,18 @@ int main(int argc, char **argv) {
   auto Lowered = ExitOnErr(lowerToLLVM(TargetMachine->createDataLayout()));
   Lowered.Module->setTargetTriple(llvm::Triple(TargetTriple));
 
-  const char *Filename = "output.o";
+  llvm::SmallString<256> Filename;
+  if (OutputFilename.empty()) {
+    Filename = InputFilename;
+    llvm::sys::path::replace_extension(Filename, "o");
+  } else {
+    Filename = OutputFilename;
+  }
   std::error_code EC;
   llvm::raw_fd_ostream Dest(Filename, EC, llvm::sys::fs::OF_None);
   if (EC) {
-    llvm::errs() << "Could not open file: " << EC.message() << '\n';
+    llvm::errs() << "Could not open " << Filename << ": " << EC.message()
+                 << '\n';
     return 1;
   }
 

@@ -231,8 +231,7 @@ public:
 };
 
 /// PrototypeAST - This class represents the "prototype" for a function,
-/// which captures its name, and its argument names (thus implicitly the number
-/// of arguments the function takes).
+/// which captures its argument names as well as if it is an operator.
 class PrototypeAST {
   std::string Name;
   std::vector<std::string> Args;

@@ -20,6 +20,7 @@
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Transforms/Passes.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
@@ -27,6 +28,7 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Target/TargetMachine.h"
@@ -264,8 +266,7 @@ public:
 };
 
 /// PrototypeAST - This class represents the "prototype" for a function,
-/// which captures its name, and its argument names (thus implicitly the number
-/// of arguments the function takes).
+/// which captures its argument names as well as if it is an operator.
 class PrototypeAST {
   std::string Name;
   std::vector<std::string> Args;
@@ -712,18 +713,28 @@ static std::map<std::string, Value> NamedValues;
 static std::unique_ptr<llvm::orc::KaleidoscopeJIT> TheJIT;
 static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos;
 static llvm::ExitOnError ExitOnErr;
-static llvm::cl::opt<bool> DumpMLIR(
-    "dump-mlir", llvm::cl::desc("Print generated MLIR"),
-    llvm::cl::init(false));
+static llvm::cl::opt<bool> DumpMLIR("dump-mlir",
+                                    llvm::cl::desc("Print generated MLIR"),
+                                    llvm::cl::init(false));
 static llvm::cl::opt<bool>
     EmitObject("emit-object",
-               llvm::cl::desc("Compile all input to output.o instead of using "
-                              "the JIT"),
+               llvm::cl::desc(
+                   "Compile an input file to an object instead of using the JIT"),
                llvm::cl::init(false));
+static llvm::cl::opt<std::string> InputFilename(llvm::cl::Positional,
+                                                llvm::cl::desc("<input file>"),
+                                                llvm::cl::init(""));
+static llvm::cl::opt<std::string>
+    TargetTripleOption("target",
+                       llvm::cl::desc("Target triple for object emission"),
+                       llvm::cl::value_desc("triple"), llvm::cl::init(""));
+static llvm::cl::opt<std::string>
+    OutputFilename("o", llvm::cl::desc("Output filename"),
+                   llvm::cl::value_desc("filename"), llvm::cl::init(""));
 static llvm::cl::opt<bool>
     DumpLLVMIR("dump-llvm-ir",
-             llvm::cl::desc("Print LLVM IR before emitting the object file"),
-             llvm::cl::init(false));
+               llvm::cl::desc("Print LLVM IR before emitting the object file"),
+               llvm::cl::init(false));
 
 static Location getLocation() { return TheBuilder->getUnknownLoc(); }
 
@@ -776,7 +787,7 @@ Value VariableExprAST::codegen() {
     return LogErrorV("Unknown variable name");
 
   return TheBuilder->create<memref::LoadOp>(getLocation(), It->second,
-                                             ValueRange{});
+                                            ValueRange{});
 }
 
 Value UnaryExprAST::codegen() {
@@ -1007,9 +1018,9 @@ Value VarExprAST::codegen() {
                                         ValueRange{});
 
     auto Old = NamedValues.find(Name);
-    OldBindings.emplace_back(
-        Name, Old == NamedValues.end() ? std::optional<Value>()
-                                      : std::optional<Value>(Old->second));
+    OldBindings.emplace_back(Name, Old == NamedValues.end()
+                                       ? std::optional<Value>()
+                                       : std::optional<Value>(Old->second));
     NamedValues[Name] = Storage;
   }
 
@@ -1177,7 +1188,6 @@ static void HandleDefinition() {
             std::move(Lowered.Module), std::move(Lowered.Context))));
         InitializeModuleAndManagers();
       }
-
     }
   } else {
     // Skip token for error recovery.
@@ -1263,7 +1273,8 @@ static void MainLoop() {
     case tok_eof:
       return;
     case ';': // ignore top-level semicolons.
-      fprintf(stderr, "ready> ");
+      if (!EmitObject)
+        fprintf(stderr, "ready> ");
       getNextToken();
       continue;
     case tok_def:
@@ -1276,7 +1287,7 @@ static void MainLoop() {
       HandleTopLevelExpression();
       break;
     }
-    if (CurTok != tok_eof && CurTok != ';')
+    if (!EmitObject && CurTok != tok_eof && CurTok != ';')
       fprintf(stderr, "ready> ");
   }
 }
@@ -1289,9 +1300,32 @@ int main(int argc, char **argv) {
   llvm::cl::ParseCommandLineOptions(argc, argv,
                                     "Kaleidoscope object file compiler\n");
 
-  llvm::InitializeNativeTarget();
-  llvm::InitializeNativeTargetAsmPrinter();
-  llvm::InitializeNativeTargetAsmParser();
+  if (EmitObject && InputFilename.empty()) {
+    llvm::errs() << "Error: --emit-object requires an input file\n";
+    return 1;
+  }
+  if (!EmitObject && !InputFilename.empty()) {
+    llvm::errs() << "Error: an input file requires --emit-object\n";
+    return 1;
+  }
+  if (!EmitObject && !TargetTripleOption.empty()) {
+    llvm::errs() << "Error: --target requires --emit-object\n";
+    return 1;
+  }
+  if (!EmitObject && !OutputFilename.empty()) {
+    llvm::errs() << "Error: -o requires --emit-object\n";
+    return 1;
+  }
+  if (EmitObject && !std::freopen(InputFilename.c_str(), "r", stdin)) {
+    std::perror(("Error opening " + InputFilename).c_str());
+    return 1;
+  }
+
+  llvm::InitializeAllTargetInfos();
+  llvm::InitializeAllTargets();
+  llvm::InitializeAllTargetMCs();
+  llvm::InitializeAllAsmParsers();
+  llvm::InitializeAllAsmPrinters();
 
   // Install standard binary operators.
   // 1 is lowest precedence.
@@ -1302,7 +1336,8 @@ int main(int argc, char **argv) {
   BinopPrecedence['*'] = 40; // highest.
 
   // Prime the first token.
-  fprintf(stderr, "ready> ");
+  if (!EmitObject)
+    fprintf(stderr, "ready> ");
   getNextToken();
 
   if (!EmitObject)
@@ -1319,7 +1354,9 @@ int main(int argc, char **argv) {
     return 0;
 
   // Select the host target and configure its object-file emitter.
-  auto TargetTriple = llvm::sys::getDefaultTargetTriple();
+  std::string TargetTriple = TargetTripleOption.empty()
+                                 ? llvm::sys::getDefaultTargetTriple()
+                                 : llvm::Triple::normalize(TargetTripleOption);
   std::string Error;
   const llvm::Target *Target =
       llvm::TargetRegistry::lookupTarget(TargetTriple, Error);
@@ -1342,17 +1379,24 @@ int main(int argc, char **argv) {
   auto Lowered = ExitOnErr(lowerToLLVM(TargetMachine->createDataLayout()));
   Lowered.Module->setTargetTriple(llvm::Triple(TargetTriple));
 
-  const char *Filename = "output.o";
+  llvm::SmallString<256> Filename;
+  if (OutputFilename.empty()) {
+    Filename = InputFilename;
+    llvm::sys::path::replace_extension(Filename, "o");
+  } else {
+    Filename = OutputFilename;
+  }
   std::error_code EC;
   llvm::raw_fd_ostream Dest(Filename, EC, llvm::sys::fs::OF_None);
   if (EC) {
-    llvm::errs() << "Could not open file: " << EC.message() << '\n';
+    llvm::errs() << "Could not open " << Filename << ": " << EC.message()
+                 << '\n';
     return 1;
   }
 
   llvm::legacy::PassManager EmitPM;
-  if (TargetMachine->addPassesToEmitFile(
-          EmitPM, Dest, nullptr, llvm::CodeGenFileType::ObjectFile)) {
+  if (TargetMachine->addPassesToEmitFile(EmitPM, Dest, nullptr,
+                                         llvm::CodeGenFileType::ObjectFile)) {
     llvm::errs() << "Target machine cannot emit an object file\n";
     return 1;
   }

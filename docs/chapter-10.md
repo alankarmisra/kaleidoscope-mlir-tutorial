@@ -342,7 +342,7 @@ Evaluated to 15.000000
 and the alternative compilation mode still emits an object file:
 
 ```bash
-./toy --emit-object < program.ks
+./build/toy --emit-object program.ks
 ```
 
 ## Testing the Dialect

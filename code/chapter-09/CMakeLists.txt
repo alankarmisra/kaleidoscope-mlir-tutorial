@@ -30,7 +30,7 @@ llvm_map_components_to_libnames(LLVM_LIBS
   OrcJIT
   Support
   Target
-  native
+  ${LLVM_TARGETS_TO_BUILD}
 )
 
 target_link_libraries(toy PRIVATE
