@@ -191,75 +191,54 @@ The location is now part of the MLIR operation. Conversion passes carry it
 through the lowering pipeline, and the final LLVM translation turns it into a
 `DILocation` attached to the generated instruction.
 
-## DWARF Emission Setup
+## Variables and Our First Custom Pass
 
-After lowering our higher-level operations to the LLVM dialect, we describe
-the source file with a compile unit. We identify the language as C, which suits
-Kaleidoscope because we follow the C calling convention and ABI. The
-optimization flag comes directly from the option selected by the user:
+Now that we have functions, we need to be able to print out the variables we have in scope. Let's get our function arguments set up so we can get decent backtraces and see how our functions are being called. MLIR represents values in SSA form and does not preserve our source-level variable names. A source location tells the debugger where an operation came from, but not that a value represents a variable named `x`. To make function arguments visible by name in the debugger, we need to attach that information explicitly.
 
 ```cpp
-auto File = InputPath.empty()
-                ? LLVM::DIFileAttr::get(Context, "<stdin>", "")
-                : LLVM::DIFileAttr::get(
-                      Context, llvm::sys::path::filename(InputPath),
-                      llvm::sys::path::parent_path(InputPath));
-auto CompileUnit = LLVM::DICompileUnitAttr::get(
-    DistinctAttr::create(UnitAttr::get(Context)), llvm::dwarf::DW_LANG_C,
-    File, StringAttr::get(Context, "Kaleidoscope"),
-    /*isOptimized=*/OptLevel != '0', LLVM::DIEmissionKind::Full);
-Module->setLoc(FusedLoc::get(Context, {Module.getLoc()}, CompileUnit));
+FunctionParameters[P.getName()] = P.getArgs();
 ```
 
-We also attach a subprogram description to every lowered function. Definitions
-are marked with `Definition`, while optimized builds additionally use the
-`Optimized` flag:
+We could walk the lowered module and add the remaining debug attributes here,
+but that work is a natural fit for an MLIR pass. A pass is a structured way to
+inspect or transform some IR, and frontends can add their own passes alongside
+the ones supplied by MLIR.
+
+Our `KaleidoscopeDebugInfoPass` runs after lowering to the LLVM dialect. It
+creates the compile unit, describes each function and its parameters, and
+connects those parameters to their lowered stack storage. The source language
+is recorded as C because Kaleidoscope follows the C calling convention and
+ABI. The implementation lives in
+[`KaleidoscopeDebugInfo.cpp`](../code/chapter-09/KaleidoscopeDebugInfo.cpp) for
+readers interested in the debug metadata itself. The general machinery for
+writing a pass is described in MLIR's [Pass Infrastructure](https://mlir.llvm.org/docs/PassManagement/#pass-creation)
+documentation.
+
+The pass is exposed through a small creation function:
 
 ```cpp
-for (LLVM::LLVMFuncOp Function : Module.getOps<LLVM::LLVMFuncOp>()) {
-  Location OriginalLoc = Function.getLoc();
-  LLVM::DIFileAttr FunctionFile = File;
-  int64_t Line = 1;
-  if (auto FileLoc = OriginalLoc->findInstanceOf<FileLineColLoc>()) {
-    llvm::StringRef FunctionPath = FileLoc.getFilename().getValue();
-    FunctionFile = LLVM::DIFileAttr::get(
-        Context, llvm::sys::path::filename(FunctionPath),
-        llvm::sys::path::parent_path(FunctionPath));
-    Line = FileLoc.getLine();
-  }
-
-  DistinctAttr Id;
-  LLVM::DICompileUnitAttr FunctionCompileUnit = CompileUnit;
-  auto Flags = static_cast<LLVM::DISubprogramFlags>(0);
-  if (OptLevel != '0')
-    Flags = Flags | LLVM::DISubprogramFlags::Optimized;
-  if (Function.isExternal()) {
-    FunctionCompileUnit = {};
-  } else {
-    Id = DistinctAttr::create(UnitAttr::get(Context));
-    Flags = Flags | LLVM::DISubprogramFlags::Definition;
-  }
-
-  auto FunctionType = LLVM::DISubroutineTypeAttr::get(
-      Context, llvm::dwarf::DW_CC_normal, {});
-  auto Name = Function.getNameAttr();
-  auto Scope = LLVM::DISubprogramAttr::get(
-      Context, Id, FunctionCompileUnit, FunctionFile, Name, Name,
-      FunctionFile, Line, Line, Flags, FunctionType,
-      /*retainedNodes=*/{}, /*annotations=*/{});
-  Function->setLoc(FusedLoc::get(Context, {OriginalLoc}, Scope));
-}
+std::unique_ptr<mlir::Pass> createKaleidoscopeDebugInfoPass(
+    llvm::StringRef inputFilename, char optLevel,
+    const std::map<std::string, std::vector<std::string>> &functionParameters);
 ```
 
-We then run MLIR's debug-scope pass. Because the compile unit and subprograms
-already exist, the pass preserves them and adds the remaining scope information
-to our operation locations. The information is later translated into LLVM IR
-debug metadata automatically.
+We add it to a pass manager just like any built-in MLIR pass:
+
+```cpp
+PassManager DebugPM(TheContext.get());
+DebugPM.addPass(createKaleidoscopeDebugInfoPass(
+    InputFilename.getValue(), OptLevel, FunctionParameters));
+```
+
+We follow it with MLIR's
+[ensure debug info scope on LLVM functions](https://mlir.llvm.org/docs/Passes/#-ensure-debug-info-scope-on-llvm-func)
+pass. Our pass supplies the language-specific compile unit, functions, and
+variables; MLIR's pass preserves that information and fills in the remaining
+scopes on the lowered operations:
 
 ```cpp
 LLVM::DIScopeForLLVMFuncOpPassOptions DebugOptions;
 DebugOptions.emissionKind = LLVM::DIEmissionKind::Full;
-PassManager DebugPM(TheContext.get());
 DebugPM.addPass(
     LLVM::createDIScopeForLLVMFuncOpPass(std::move(DebugOptions)));
 if (failed(DebugPM.run(*TheModule)))
@@ -268,87 +247,9 @@ if (failed(DebugPM.run(*TheModule)))
       llvm::inconvertibleErrorCode());
 ```
 
-## Variables
-
-Now that we have functions, we need to be able to print out the variables we have in scope. Let's get our function arguments set up so we can get decent backtraces and see how our functions are being called. MLIR represents values in SSA form and does not preserve our source-level variable names. A source location tells the debugger where an operation came from, but not that a value represents a variable named `x`. To make function arguments visible by name in the debugger, we need to attach that information explicitly.
-
-```cpp
-FunctionParameters[P.getName()] = P.getArgs();
-```
-
-After lowering to the LLVM dialect, we can attach debug information to each variable declaration. This records the variable's name, type, source location, and storage location so it remains visible to the debugger.
-
-```cpp
-MLIRContext *Context = Module.getContext();
-auto DoubleType = LLVM::DIBasicTypeAttr::get(
-    Context, llvm::dwarf::DW_TAG_base_type, "double", 64,
-    llvm::dwarf::DW_ATE_float);
-auto EmptyExpression = LLVM::DIExpressionAttr::get(Context);
-```
-
-Memref lowering represents the mutable storage with an LLVM pointer wrapped in
-a descriptor. With optimization, that descriptor is usually simplified away.
-At `-O0`, however, the address used by the store may still be produced by a
-chain of `llvm.insertvalue` and `llvm.extractvalue` operations. A debug
-declaration attached to that derived value does not produce a stable DWARF
-location for the parameter.
-
-We therefore follow the operands of the value until we reach the underlying
-`llvm.alloca`:
-
-```cpp
-static Value findUnderlyingAlloca(Value V) {
-  Operation *DefiningOp = V.getDefiningOp();
-  if (!DefiningOp)
-    return {};
-  if (isa<LLVM::AllocaOp>(DefiningOp))
-    return V;
-  for (Value Operand : DefiningOp->getOperands())
-    if (Value Alloca = findUnderlyingAlloca(Operand))
-      return Alloca;
-  return {};
-}
-```
-
-For each parameter, we use its function scope and lowered stack address to
-create the variable description and declaration:
-
-```cpp
-auto Variable = LLVM::DILocalVariableAttr::get(
-    Scope, Name, Scope.getFile(), Scope.getLine(), ArgumentNumber + 1,
-    /*alignInBits=*/0, DoubleType, LLVM::DIFlags::Zero);
-Value VariableAddress = findUnderlyingAlloca(ArgumentStore.getAddr());
-if (!VariableAddress)
-  VariableAddress = ArgumentStore.getAddr();
-OpBuilder Builder(ArgumentStore);
-Builder.setInsertionPointAfter(ArgumentStore);
-Builder.create<LLVM::DbgDeclareOp>(ArgumentStore.getLoc(),
-                                   VariableAddress, Variable,
-                                   EmptyExpression);
-```
-
-`DILocalVariableAttr` records the scope, name, source location, argument
-number, and type. `DbgDeclareOp` says that the variable lives at the recovered
-stack address. During translation this becomes LLVM's `#dbg_declare` record.
-Without the recovery, the declaration refers to the descriptor extraction:
-
-```llvm
-#dbg_declare(ptr %descriptor_extract, ...)
-```
-
-With the underlying allocation, it instead refers to the actual stack slot:
-
-```llvm
-#dbg_declare(ptr %alloca, ...)
-```
-
-This is what allows the parameter to remain visible in the emitted DWARF when
-we compile with `-O0`.
-
-With this we have enough debug information to set breakpoints in functions,
-print their arguments, and inspect the call stack. The source locations and
-variable descriptions were both created in MLIR; translating the LLVM dialect
-produces the final LLVM debug metadata.
+With this we have enough information to set breakpoints in functions, print
+their arguments, and inspect the call stack. Translation from the LLVM dialect
+then produces the final LLVM debug metadata.
 
 ## Inspecting the Debug Information
 
@@ -415,6 +316,16 @@ cmake --build build
 Here is the code:
 
 ```cpp(../code/chapter-09/toy.cpp)
+```
+
+Here is the interface for our debug-information pass:
+
+```cpp(../code/chapter-09/KaleidoscopeDebugInfo.h)
+```
+
+And here is its implementation:
+
+```cpp(../code/chapter-09/KaleidoscopeDebugInfo.cpp)
 ```
 
 [Next: Conclusion and other useful LLVM tidbits](chapter-10.md)

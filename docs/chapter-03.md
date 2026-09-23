@@ -86,11 +86,11 @@ Value NumberExprAST::codegen() {
 
 In MLIR, one way to represent numeric constants is to use the
 `arith::ConstantOp` operation from MLIR's
-[`arith`](https://mlir.llvm.org/docs/Dialects/ArithOps/) *dialect* for
+[arith](https://mlir.llvm.org/docs/Dialects/ArithOps/) *dialect* for
 arithmetic operations. For now, you can think of dialects as libraries of related operations
 and types. The dialects used in this tutorial provide convenient ways
 to express arithmetic, functions, control flow, and memory at a higher
-level, before MLIR progressively lowers them to LLVM IR. Where relevant,
+level, before MLIR progressively lowers (translates) them to LLVM IR. Where relevant,
 we will compare these higher-level MLIR operations with the corresponding
 LLVM IR to see how they simplify code generation. We will discuss
 dialects in more detail and build a custom Kaleidoscope dialect in a
@@ -166,13 +166,13 @@ may change when the IR is transformed or printed again.
 
 [MLIR operations](https://mlir.llvm.org/docs/LangRef/#operations) are
 constrained by strict rules. For example, the left and right operands of
-an [`arith.addf`](https://mlir.llvm.org/docs/Dialects/ArithOps/#arithaddf-arithaddfop)
+an [arith.addf](https://mlir.llvm.org/docs/Dialects/ArithOps/#arithaddf-arithaddfop)
 operation must have the same type, and the result type must match the
 operand types. Because all values in Kaleidoscope are doubles, this makes
 for very simple code for add, sub, and mul.
 
-On the other hand, the [`arith.cmpf`](https://mlir.llvm.org/docs/Dialects/ArithOps/#arithcmpf-arithcmpfop)
-operation returns an `i1` value when comparing scalar operands. The problem with this is that Kaleidoscope wants the value to be a `0.0` or `1.0`. To get these semantics, we combine `arith.cmpf` with an [`arith.uitofp`](https://mlir.llvm.org/docs/Dialects/ArithOps/#arithuitofp-arithuitofpop) operation. This operation converts its input integer into a floating-point value by treating the input as unsigned. In contrast, if we used an [`arith.sitofp`](https://mlir.llvm.org/docs/Dialects/ArithOps/#arithsitofp-arithsitofpop) operation, the Kaleidoscope `<` operator would return `0.0` or `-1.0`, depending on the comparison result.
+On the other hand, the [arith.cmpf](https://mlir.llvm.org/docs/Dialects/ArithOps/#arithcmpf-arithcmpfop)
+operation returns an `i1` value when comparing scalar operands. The problem with this is that Kaleidoscope wants the value to be a `0.0` or `1.0`. To get these semantics, we combine `arith.cmpf` with an [arith.uitofp](https://mlir.llvm.org/docs/Dialects/ArithOps/#arithuitofp-arithuitofpop) operation. This operation converts its input integer into a floating-point value by treating the input as unsigned. In contrast, if we used an [arith.sitofp](https://mlir.llvm.org/docs/Dialects/ArithOps/#arithsitofp-arithsitofpop) operation, the Kaleidoscope `<` operator would return `0.0` or `-1.0`, depending on the comparison result.
 
 ```cpp
 Value CallExprAST::codegen() {
@@ -199,7 +199,7 @@ Value CallExprAST::codegen() {
 
 Code generation for function calls is quite straightforward with MLIR and the [func](https://mlir.llvm.org/docs/Dialects/Func/) dialect (yes there's a dialect for most common operations - which is what makes MLIR so useful!). The code above initially does a function name lookup in the MLIR Module's symbol table. Recall that the MLIR Module is the container that holds the functions we are JIT'ing. By giving each function the same name as what the user specifies, we can use the MLIR symbol table to resolve function names for us.
 
-Once we have the function to call, we recursively codegen each argument that is to be passed in, and create an MLIR [`func.call`](https://mlir.llvm.org/docs/Dialects/Func/#funccall-funccallop) Operation. In the next chapter, we'll see how these calls are lowered using the default C calling convention, allowing us to call external C functions like `sin` and `cos`.
+Once we have the function to call, we recursively codegen each argument that is to be passed in, and create an MLIR [func.call](https://mlir.llvm.org/docs/Dialects/Func/#funccall-funccallop) Operation. In the next chapter, we'll see how these calls are lowered using the default C calling convention, allowing us to call external C functions like `sin` and `cos`.
 
 This wraps up our handling of the four basic expressions that we have so far in Kaleidoscope. Feel free to go in and add some more. For example, by browsing the [arith dialect](https://mlir.llvm.org/docs/Dialects/ArithOps/) you'll find
 several other interesting operations that are really easy to plug into our basic framework.
@@ -283,17 +283,9 @@ For function definitions, we start by searching TheModule's symbol table for an 
     NamedValues[Proto->getArgs()[Index++]] = Argument;
 ```
 
-Now we get to the point where `TheBuilder` is set up. The first line
-adds a new [basic block](http://en.wikipedia.org/wiki/Basic_block) to
-`TheFunction`. The second line then tells the builder that new
-operations should be inserted at the start of the new basic block. Blocks
-in MLIR are an important part of regions and define the
-[Control Flow Graph](http://en.wikipedia.org/wiki/Control_flow_graph).
-Since we don't have any control flow, our functions will only contain
-one block at this point. We'll fix this in [Chapter 5](chapter-05.md) :).
+Now we get to the point where `TheBuilder` is set up. The first line adds a new [basic block](http://en.wikipedia.org/wiki/Basic_block) to `TheFunction`. The second line then tells the builder that new operations should be inserted at the start of the new basic block. In MLIR, a function always contains a region for its body, and that region contains blocks. Blocks define the [Control Flow Graph](http://en.wikipedia.org/wiki/Control_flow_graph). Since we don't have any control flow, our functions will only contain one block at this point. We'll fix this in [Chapter 5](chapter-05.md) :).
 
-Next we add the function arguments to the `NamedValues` map (after first clearing
-it out) so that they're accessible to `VariableExprAST` nodes.
+Next we add the function arguments to the `NamedValues` map (after first clearing it out) so that they're accessible to `VariableExprAST` nodes.
 
 ```cpp
   if (Value RetVal = Body->codegen()) {

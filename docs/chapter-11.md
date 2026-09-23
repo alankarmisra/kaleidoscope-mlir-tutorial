@@ -54,7 +54,7 @@ on it. For example, try adding:
   SSA index values directly, no separate address-computation instruction
   required. If you'd rather work closer to the metal, once you're in the
   `llvm` dialect you have direct access to
-  [`llvm.getelementptr`](https://mlir.llvm.org/docs/Dialects/LLVM/#llvmgetelementptr-llvmgepop),
+  [llvm.getelementptr](https://mlir.llvm.org/docs/Dialects/LLVM/#llvmgetelementptr-llvmgepop),
   MLIR's mirror of LLVM's `getelementptr` instruction: it is so
   nifty/unconventional, it [has its own
   FAQ](https://llvm.org/docs/GetElementPtr.html)!

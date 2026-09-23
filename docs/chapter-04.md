@@ -192,7 +192,7 @@ int main() {
 ```
 
 The KaleidoscopeJIT class is a simple JIT included with this tutorial in
-[`code/include/KaleidoscopeJIT.h`](../code/include/KaleidoscopeJIT.h). In later
+[code/include/KaleidoscopeJIT.h](../code/include/KaleidoscopeJIT.h). In later
 chapters we will look at how it works and extend it with new features, but for
 now we will take it as given. Its API is very simple: `addModule` adds an LLVM
 IR module to the JIT, making its functions available for execution (with its
@@ -255,10 +255,7 @@ static llvm::Expected<llvm::orc::ThreadSafeModule> lowerToLLVM() {
 
 ## The `--dump-llvm-ir` Option
 
-Just as `--dump-mlir` lets us inspect the MLIR produced by the front-end,
-`--dump-llvm-ir` lets us inspect the LLVM IR produced by `lowerToLLVM()` before
-it is handed to the JIT. The option is defined using LLVM's command-line
-support:
+Just as `--dump-mlir` lets us inspect the MLIR produced by the front-end, `--dump-llvm-ir` lets us inspect the LLVM IR produced by `lowerToLLVM()` before it is handed to the JIT. We'll use it in the next chapter to learn about an important LLVM concept, the `PHI node`. The option is defined using LLVM's command-line support:
 
 ```cpp
 static llvm::cl::opt<bool> DumpLLVMIR(
@@ -275,9 +272,6 @@ if (DumpLLVMIR) {
   llvm::errs() << '\n';
 }
 ```
-
-This is useful for seeing the final representation consumed by the ORC JIT and
-for diagnosing problems that occur after MLIR lowering.
 
 ## Evaluating Top-Level Expressions
 

@@ -6,21 +6,18 @@ Welcome to Chapter 7 of the "[Implementing a language with MLIR](chapter-00.md)"
 very respectable, albeit simple, [functional programming
 language](http://en.wikipedia.org/wiki/Functional_programming). In our
 journey, we learned some parsing techniques, how to build and represent
-an AST, how to build LLVM IR, and how to optimize the resultant code as
-well as JIT compile it.
+an AST, how to build MLIR, lower it to LLVM IR, optimize it, and JIT compile it.
 
 While Kaleidoscope is interesting as a functional language, the fact
-that it is functional makes it "too easy" to generate LLVM IR for it. In
-particular, a functional language makes it very easy to build LLVM IR
-directly in [SSA
+that it is functional makes it "too easy" to generate SSA-based IR for it. In
+particular, a functional language makes it very easy to build values directly in [SSA
 form](http://en.wikipedia.org/wiki/Static_single_assignment_form).
-Since LLVM requires that the input code be in SSA form, this is a very
-nice property and it is often unclear to newcomers how to generate code
+MLIR also represents values in SSA form, so this is a very nice property and it is often unclear to newcomers how to generate code
 for an imperative language with mutable variables.
 
 The short (and happy) summary of this chapter is that there is no need
-for your front-end to build SSA form: LLVM provides highly tuned and
-well tested support for this, though the way it works is a bit
+for your front-end to build SSA form: MLIR provides reusable and well-tested
+support for this, though the way it works is a bit
 unexpected for some.
 
 ## Why is this a hard problem?
@@ -78,173 +75,177 @@ of this chapter is not to explain the details of SSA form. For more
 information, see one of the many [online
 references](http://en.wikipedia.org/wiki/Static_single_assignment_form).
 
-The question for this article is "who places the phi nodes when lowering
-assignments to mutable variables?". The issue here is that LLVM
-*requires* that its IR be in SSA form: there is no "non-ssa" mode for
-it. However, SSA construction requires non-trivial algorithms and data
-structures, so it is inconvenient and wasteful for every front-end to
-have to reproduce this logic.
+The question for this chapter is: who places the MLIR block arguments when
+lowering assignments to mutable variables? As we saw in Chapter 5, we can solve
+this problem entirely in MLIR. The issue here is that MLIR represents values in SSA form: there is no
+"non-SSA" mode for values. However, SSA construction requires non-trivial
+algorithms and data structures, so it is inconvenient and wasteful for every
+frontend to have to reproduce this logic.
 
-## Memory in LLVM
+## Memory in MLIR
 
-The 'trick' here is that while LLVM does require all register values to
-be in SSA form, it does not require (or permit) memory objects to be in
-SSA form. In the example above, note that the loads from G and H are
-direct accesses to G and H: they are not renamed or versioned. This
-differs from some other compiler systems, which do try to version memory
-objects. In LLVM, instead of encoding dataflow analysis of memory into
-the LLVM IR, it is handled with [Analysis
-Passes](https://llvm.org/docs/WritingAnLLVMPass.html) which are computed on demand.
+The "trick" here is that while MLIR does require all values to be in SSA form,
+it does not require the contents of memory to be in SSA form. In the example
+above, note that the loads from G and H are direct accesses to G and H: the
+memory objects are not renamed or versioned. This differs from some other
+compiler systems, which do try to version memory objects. In MLIR, instead of
+encoding dataflow analysis of memory into the IR, it is handled with
+[analyses and passes](https://mlir.llvm.org/docs/PassManagement/#analysis-management)
+that are computed when needed.
 
-With this in mind, the high-level idea is that we want to make a stack
-variable (which lives in memory, because it is on the stack) for each
-mutable object in a function. To take advantage of this trick, we need
-to talk about how LLVM represents stack variables.
+With this in mind, the high-level idea is that we want to make a stack variable
+(which lives in memory, because it is on the stack) for each mutable object in
+a function. To take advantage of this trick, we need to talk about how MLIR
+represents stack variables.
 
-In LLVM, all memory accesses are explicit with load/store instructions,
-and it is carefully designed not to have (or need) an "address-of"
-operator. Notice how the type of the @G/@H global variables is actually
-`i32*` even though the variable is defined as "i32". What this means is
-that @G defines *space* for an i32 in the global data area, but its
-*name* actually refers to the address for that space. Stack variables
-work the same way, except that instead of being declared with global
-variable definitions, they are declared with the [LLVM alloca
-instruction](https://llvm.org/docs/LangRef.html#alloca-instruction):
+In MLIR, all memory accesses are explicit with `memref.load` and
+`memref.store` operations, and there is no need for an "address-of" operator at
+this level. Notice how the type of `%x` in the example below is actually
+`memref<f64>` even though the variable holds an `f64`. What this means is that
+`%x` identifies *space* for an `f64`, and its name refers to that storage rather
+than to the value currently stored there. Stack variables are declared with
+the [memref.alloca](https://mlir.llvm.org/docs/Dialects/MemRef/#memrefalloca-memrefallocaop)
+operation:
 
-```llvm
-define i32 @example() {
-entry:
-  %X = alloca i32           ; type of %X is i32*.
-  ...
-  %tmp = load i32, i32* %X  ; load the stack value %X from the stack.
-  %tmp2 = add i32 %tmp, 1   ; increment it
-  store i32 %tmp2, i32* %X  ; store it back
-  ...
+```mlir
+%x = memref.alloca() : memref<f64>
+memref.store %initial, %x[] : memref<f64>
+%value = memref.load %x[] : memref<f64>
 ```
 
 This code shows an example of how you can declare and manipulate a stack
-variable in the LLVM IR. Stack memory allocated with the alloca
-instruction is fully general: you can pass the address of the stack slot
-to functions, you can store it in other variables, etc. In our example
-above, we could rewrite the example to use the alloca technique to avoid
-using a PHI node:
+variable in MLIR.  Stack memory allocated with `memref.alloca` is fully general: you can pass the
+memref to functions, create aliases or views of it, and use it with other
+memory operations. In our example above, we could rewrite the example to use
+the `memref.alloca` technique to avoid creating block arguments in the
+frontend:
 
-```llvm
-@G = weak global i32 0   ; type of @G is i32*
-@H = weak global i32 0   ; type of @H is i32*
-
-define i32 @test(i1 %Condition) {
-entry:
-  %X = alloca i32           ; type of %X is i32*.
-  br i1 %Condition, label %cond_true, label %cond_false
-
-cond_true:
-  %X.0 = load i32, i32* @G
-  store i32 %X.0, i32* %X   ; Update X
-  br label %cond_next
-
-cond_false:
-  %X.1 = load i32, i32* @H
-  store i32 %X.1, i32* %X   ; Update X
-  br label %cond_next
-
-cond_next:
-  %X.2 = load i32, i32* %X  ; Read X
-  ret i32 %X.2
+```mlir
+// example.mlir
+module {
+  func.func @test(%condition: i1, %g: f64, %h: f64) -> f64 {
+    %x = memref.alloca() : memref<f64>
+    scf.if %condition {
+      memref.store %g, %x[] : memref<f64>
+    } else {
+      memref.store %h, %x[] : memref<f64>
+    }
+    %value = memref.load %x[] : memref<f64>
+    return %value : f64
+  }
 }
 ```
 
-With this, we have discovered a way to handle arbitrary mutable
-variables without the need to create Phi nodes at all:
+If we lower this directly to LLVM IR without running `mem2reg`, the stack slot
+and its accesses remain. The `insertvalue` and `extractvalue` instructions
+construct and access the descriptor used while lowering the memref, but the
+important operations here are the `alloca`, the store in each branch, and the
+load after the branches merge:
+
+```llvm
+define double @test(i1 %0, double %1, double %2) {
+  %4 = alloca double, i64 1, align 8
+  %5 = insertvalue { ptr, ptr, i64 } poison, ptr %4, 0
+  %6 = insertvalue { ptr, ptr, i64 } %5, ptr %4, 1
+  %7 = insertvalue { ptr, ptr, i64 } %6, i64 0, 2
+  br i1 %0, label %8, label %10
+
+8:
+  %9 = extractvalue { ptr, ptr, i64 } %7, 1
+  store double %1, ptr %9, align 8
+  br label %12
+
+10:
+  %11 = extractvalue { ptr, ptr, i64 } %7, 1
+  store double %2, ptr %11, align 8
+  br label %12
+
+12:
+  %13 = extractvalue { ptr, ptr, i64 } %7, 1
+  %14 = load double, ptr %13, align 8
+  ret double %14
+}
+```
+
+With this, we have discovered a way to handle arbitrary mutable variables
+without the need to create block arguments at all:
 
 1. Each mutable variable becomes a stack allocation.
 2. Each read of the variable becomes a load from the stack.
 3. Each update of the variable becomes a store to the stack.
-4. Taking the address of a variable just uses the stack address
-   directly.
+4. Passing a variable's storage uses the memref directly.
 
-While this solution has solved our immediate problem, it introduced
-another one: we have now apparently introduced a lot of stack traffic
-for very simple and common operations, a major performance problem.
-Fortunately for us, the LLVM optimizer has a highly-tuned optimization
-pass named "mem2reg" that handles this case, promoting allocas like this
-into SSA registers, inserting Phi nodes as appropriate. If you run this
-example through the pass, for example, you'll get:
+While this solution has solved our immediate problem, it introduced another
+one: we have now apparently introduced a lot of stack traffic for very simple
+and common operations, a major performance problem. Fortunately for us, MLIR
+has a `mem2reg` pass that handles this case, promoting suitable memory slots
+into SSA values and inserting block arguments as appropriate.
+
+The `mem2reg` pass operates on control-flow blocks, so we first lower `scf.if`
+to the `cf` dialect. If you run this example through the passes, you'll get:
 
 ```bash
-$ llvm-as < example.ll | opt -passes=mem2reg | llvm-dis
-@G = weak global i32 0
-@H = weak global i32 0
+mlir-opt example.mlir --convert-scf-to-cf --mem2reg
+```
 
-define i32 @test(i1 %Condition) {
-entry:
-  br i1 %Condition, label %cond_true, label %cond_false
-
-cond_true:
-  %X.0 = load i32, i32* @G
-  br label %cond_next
-
-cond_false:
-  %X.1 = load i32, i32* @H
-  br label %cond_next
-
-cond_next:
-  %X.01 = phi i32 [ %X.1, %cond_false ], [ %X.0, %cond_true ]
-  ret i32 %X.01
+```mlir
+module {
+  func.func @test(%arg0: i1, %arg1: f64, %arg2: f64) -> f64 {
+    cf.cond_br %arg0, ^bb1, ^bb2
+  ^bb1:
+    cf.br ^bb3(%arg1 : f64)
+  ^bb2:
+    cf.br ^bb3(%arg2 : f64)
+  ^bb3(%0: f64):
+    return %0 : f64
+  }
 }
 ```
 
-The mem2reg pass implements the standard "iterated dominance frontier"
-algorithm for constructing SSA form and has a number of optimizations
-that speed up (very common) degenerate cases. The mem2reg optimization
-pass is the answer to dealing with mutable variables, and we highly
-recommend that you depend on it. Note that mem2reg only works on
-variables in certain circumstances:
+The `mem2reg` pass implements the standard "iterated dominance frontier"
+algorithm for constructing SSA form. When multiple stored values can reach a
+load, it inserts a block argument at the merge point and passes the appropriate
+value from each predecessor. The `mem2reg` optimization pass is the answer to
+dealing with mutable variables, and we highly recommend that you depend on it.
+Note that MLIR's `mem2reg` only works on variables in certain circumstances:
 
-1. mem2reg is alloca-driven: it looks for allocas and if it can handle
-   them, it promotes them. It does not apply to global variables or heap
+1. `mem2reg` is allocation-driven: it looks for operations that expose
+   promotable memory slots. For this tutorial, those are `memref.alloca`
+   operations. It does not promote global variables or arbitrary heap
    allocations.
-2. mem2reg only looks for alloca instructions in the entry block of the
-   function. Being in the entry block guarantees that the alloca is only
-   executed once, which makes analysis simpler.
-3. mem2reg only promotes allocas whose uses are direct loads and stores.
-   If the address of the stack object is passed to a function, or if any
-   funny pointer arithmetic is involved, the alloca will not be
-   promoted.
-4. mem2reg only works on allocas of [first
-   class](https://llvm.org/docs/LangRef.html#first-class-types) values (such as pointers,
-   scalars and vectors), and only if the array size of the allocation is
-   1 (or missing in the .ll file). mem2reg is not capable of promoting
-   structs or arrays to registers. Note that the "sroa" pass is
-   more powerful and can promote structs, "unions", and arrays in many
-   cases.
+2. The allocation must dominate all of its uses. Creating our stack slots in
+   the function's entry block makes them available throughout the function and
+   makes this condition easy to satisfy.
+3. Every use of the memory slot must be understood by the promotion
+   interfaces. Direct `memref.load` and `memref.store` operations work. Passing
+   the memref to an arbitrary function or using it through an unsupported alias
+   prevents promotion.
+4. A `memref.alloca` containing one element can be promoted directly to a
+   scalar SSA value. This is why Kaleidoscope uses the zero-dimensional
+   `memref<f64>` type for each mutable variable. MLIR can handle some more
+   complicated memrefs too, but those cases are not needed here.
 
-All of these properties are easy to satisfy for most imperative
-languages, and we'll illustrate it below with Kaleidoscope. The final
-question you may be asking is: should I bother with this nonsense for my
-front-end? Wouldn't it be better if I just did SSA construction
-directly, avoiding use of the mem2reg optimization pass? In short, we
-strongly recommend that you use this technique for building SSA form,
-unless there is an extremely good reason not to. Using this technique
-is:
+All of these properties are easy to satisfy for most imperative languages, and
+we'll illustrate it below with Kaleidoscope. The final question you may be
+asking is: should I bother with this nonsense for my frontend? Wouldn't it be
+better if I just did SSA construction directly, avoiding use of the `mem2reg`
+optimization pass? In short, we strongly recommend that you use this technique
+for building SSA form, unless there is an extremely good reason not to. Using
+this technique is:
 
-- Proven and well tested: clang uses this technique
-  for local mutable variables. As such, the most common clients of LLVM
-  are using this to handle a bulk of their variables. You can be sure
-  that bugs are found fast and fixed early.
-- Extremely Fast: mem2reg has a number of special cases that make it
-  fast in common cases as well as fully general. For example, it has
-  fast-paths for variables that are only used in a single block,
-  variables that only have one assignment point, good heuristics to
-  avoid insertion of unneeded phi nodes, etc.
-- Needed for debug info generation: [Debug information in
-  LLVM](https://llvm.org/docs/SourceLevelDebugging.html) relies on having the address of
-  the variable exposed so that debug info can be attached to it. This
-  technique dovetails very naturally with this style of debug info.
+- **Proven and well tested:** MLIR provides the shared SSA-construction
+  algorithm and promotion interfaces, so each frontend does not have to
+  implement and maintain its own version.
+- **Extremely fast:** `mem2reg` forwards stored values directly to their uses
+  and only adds block arguments at the merge points where they are needed.
+- **Needed for debug info generation:** keeping a variable in memory gives it a
+  concrete address to which debug information can be attached. In Chapter 9,
+  we retain that storage in unoptimized builds so the debugger can show our
+  variables.
 
-If nothing else, this makes it much easier to get your front-end up and
-running, and is very simple to implement. Let's extend Kaleidoscope with
-mutable variables now!
+If nothing else, this makes it much easier to get your frontend up and running,
+and is very simple to implement. Let's extend Kaleidoscope with mutable
+variables now!
 
 ## Mutable Variables in Kaleidoscope
 
@@ -261,7 +262,7 @@ redefining those only goes so far :). Also, the ability to define new
 variables is a useful thing regardless of whether you will be mutating
 them. Here's a motivating example that shows how we could use these:
 
-```
+```kaleidoscope
 # Define ':' for sequencing: as a low-precedence operator that ignores operands
 # and just returns the RHS.
 def binary : 1 (x y) y;
@@ -284,269 +285,137 @@ def fibi(x)
 
 # Call it.
 fibi(10);
-Evaluated to 55.000000
 ```
 
-In order to mutate variables, we have to change our existing variables
-to use the "alloca trick". Once we have that, we'll add our new
-operator, then extend Kaleidoscope to support new variable definitions.
+In order to mutate variables, we will change existing variables to use MLIR
+memory operations. Once that works, we will add assignment and then extend
+Kaleidoscope with local variable definitions.
 
 ## Adjusting Existing Variables for Mutation
 
-The symbol table in Kaleidoscope is managed at code generation time by
-the '`NamedValues`' map. This map currently keeps track of the LLVM
-`Value*` that holds the double value for the named variable. In order
-to support mutation, we need to change this slightly, so that
-`NamedValues` holds the *memory location* of the variable in question.
-Note that this change is a refactoring: it changes the structure of the
-code, but does not (by itself) change the behavior of the compiler. All
-of these changes are isolated in the Kaleidoscope code generator.
+The symbol table in Kaleidoscope is managed at code generation time by the
+`NamedValues` map. This map currently keeps track of the MLIR `Value` that
+holds the `f64` value for the named variable. In order to support mutation, we
+need to change this slightly, so that `NamedValues` holds the *memory location*
+of the variable in question. Note that this change is a refactoring: it changes
+the structure of the code, but does not (by itself) change the behavior of the
+compiler. All of these changes are isolated in the Kaleidoscope code generator.
 
-At this point in Kaleidoscope's development, it only supports variables
-for two things: incoming arguments to functions and the induction
-variable of 'for' loops. For consistency, we'll allow mutation of these
-variables in addition to other user-defined variables. This means that
-these will both need memory locations.
+At this point in Kaleidoscope's development, it only supports variables for two
+things: incoming arguments to functions and the induction variable of `for`
+loops. For consistency, we'll allow mutation of these variables in addition to
+other user-defined variables. This means that these will both need memory
+locations.
 
-To start our transformation of Kaleidoscope, we'll change the
-`NamedValues` map so that it maps to `AllocaInst*` instead of `Value*`. Once
-we do this, the C++ compiler will tell us what parts of the code we need
-to update:
+To start our transformation of Kaleidoscope, we'll change the meaning of the
+values stored in the `NamedValues` map. Instead of mapping each name directly
+to its current `f64` SSA value, it will map the name to a zero-dimensional
+memref containing the variable. Both are represented by MLIR's `Value` C++
+type, so the declaration itself does not change:
 
 ```cpp
-static std::map<std::string, AllocaInst*> NamedValues;
+static std::map<std::string, Value> NamedValues;
 ```
 
-Also, since we will need to create these allocas, we'll use a helper
-function that ensures that the allocas are created in the entry block of
-the function:
+We first find the function surrounding the builder's current insertion point,
+then use a helper to create storage at the beginning of that function:
 
 ```cpp
-/// CreateEntryBlockAlloca - Create an alloca instruction in the entry block of
-/// the function.  This is used for mutable variables etc.
-static AllocaInst *CreateEntryBlockAlloca(Function *TheFunction,
-                                          StringRef VarName) {
-  IRBuilder<> TmpB(&TheFunction->getEntryBlock(),
-                 TheFunction->getEntryBlock().begin());
-  return TmpB.CreateAlloca(Type::getDoubleTy(*TheContext), nullptr,
-                           VarName);
+static func::FuncOp getCurrentFunction() {
+  Operation *Parent = TheBuilder->getInsertionBlock()->getParentOp();
+  if (auto Function = dyn_cast<func::FuncOp>(Parent))
+    return Function;
+  return Parent->getParentOfType<func::FuncOp>();
+}
+
+/// CreateEntryBlockStorage - Create mutable storage in the function entry block.
+static Value CreateEntryBlockStorage() {
+  func::FuncOp Function = getCurrentFunction();
+  OpBuilder::InsertionGuard Guard(*TheBuilder);
+  TheBuilder->setInsertionPointToStart(&Function.front());
+  auto VariableType = MemRefType::get({}, TheBuilder->getF64Type());
+  return TheBuilder->create<memref::AllocaOp>(getLocation(), VariableType);
 }
 ```
 
-This funny looking code creates an IRBuilder object that is pointing at
-the first instruction (.begin()) of the entry block. It then creates an
-alloca with the expected name and returns it. Because all values in
-Kaleidoscope are doubles, there is no need to pass in a type to use.
+`InsertionGuard` restores the builder's previous insertion point when the
+helper returns. Placing the allocation at the start of the entry block makes
+the storage available to every region in the function.
 
-With this in place, the first functionality change we want to make belongs to
-variable references. In our new scheme, variables live on the stack, so
-code generating a reference to them actually needs to produce a load
-from the stack slot:
+A variable reference now looks up its storage and loads the current value:
 
 ```cpp
-Value *VariableExprAST::codegen() {
-  // Look this variable up in the function.
-  AllocaInst *A = NamedValues[Name];
-  if (!A)
+Value VariableExprAST::codegen() {
+  auto It = NamedValues.find(Name);
+  if (It == NamedValues.end())
     return LogErrorV("Unknown variable name");
 
-  // Load the value.
-  return Builder->CreateLoad(A->getAllocatedType(), A, Name.c_str());
+  return TheBuilder->create<memref::LoadOp>(getLocation(), It->second,
+                                             ValueRange{});
 }
 ```
 
-As you can see, this is pretty straightforward. Now we need to update
-the things that define the variables to set up the alloca. We'll start
-with `ForExprAST::codegen()` (see the [full code listing](#full-code-listing) for
-the unabridged code):
+Loop induction variables use the same representation. We allocate a slot,
+store the initial value, and make the slot visible through `NamedValues`:
 
 ```cpp
-Function *TheFunction = Builder->GetInsertBlock()->getParent();
+Value Variable = CreateEntryBlockStorage();
+TheBuilder->create<memref::StoreOp>(getLocation(), StartVal, Variable,
+                                    ValueRange{});
 
-// Create an alloca for the variable in the entry block.
-AllocaInst *Alloca = CreateEntryBlockAlloca(TheFunction, VarName);
-
-// Emit the start code first, without 'variable' in scope.
-Value *StartVal = Start->codegen();
-if (!StartVal)
-  return nullptr;
-
-// Store the value into the alloca.
-Builder->CreateStore(StartVal, Alloca);
-...
-
-// Compute the end condition.
-Value *EndCond = End->codegen();
-if (!EndCond)
-  return nullptr;
-
-// Reload, increment, and restore the alloca.  This handles the case where
-// the body of the loop mutates the variable.
-Value *CurVar = Builder->CreateLoad(Alloca->getAllocatedType(), Alloca,
-                                    VarName.c_str());
-Value *NextVar = Builder->CreateFAdd(CurVar, StepVal, "nextvar");
-Builder->CreateStore(NextVar, Alloca);
-...
+auto OldValue = NamedValues.find(VarName);
+bool HadOldValue = OldValue != NamedValues.end();
+Value SavedValue = HadOldValue ? OldValue->second : Value();
+NamedValues[VarName] = Variable;
 ```
 
-This code is virtually identical to the code [before we allowed mutable
-variables](chapter-05.md#code-generation-for-the-for-loop). The big difference is that we
-no longer have to construct a PHI node, and we use load/store to access
-the variable as needed.
-
-To support mutable argument variables, we need to also make allocas for
-them. The code for this is also pretty simple:
+After the loop body and step have run, we reload the induction variable in case
+either expression changed it, compute the next value, and store it:
 
 ```cpp
-Function *FunctionAST::codegen() {
-  ...
-  Builder->SetInsertPoint(BB);
-
-  // Record the function arguments in the NamedValues map.
-  NamedValues.clear();
-  for (auto &Arg : TheFunction->args()) {
-    // Create an alloca for this variable.
-    AllocaInst *Alloca = CreateEntryBlockAlloca(TheFunction, Arg.getName());
-
-    // Store the initial value into the alloca.
-    Builder->CreateStore(&Arg, Alloca);
-
-    // Add arguments to variable symbol table.
-    NamedValues[std::string(Arg.getName())] = Alloca;
-  }
-
-  if (Value *RetVal = Body->codegen()) {
-    ...
+Value Current =
+    Builder.create<memref::LoadOp>(Loc, Variable, ValueRange{});
+Value NextVar = Builder.create<arith::AddFOp>(Loc, Current, StepVal);
+Builder.create<memref::StoreOp>(Loc, NextVar, Variable, ValueRange{});
 ```
 
-For each argument, we make an alloca, store the input value to the
-function into the alloca, and register the alloca as the memory location
-for the argument. This method gets invoked by `FunctionAST::codegen()`
-right after it sets up the entry block for the function.
-
-The final missing piece is adding the mem2reg pass, which allows us to
-get good codegen once again:
+Function arguments also become mutable storage when a function body is
+created:
 
 ```cpp
-// Promote allocas to registers.
-TheFPM->addPass(PromotePass());
-// Do simple "peephole" optimizations and bit-twiddling optzns.
-TheFPM->addPass(InstCombinePass());
-// Reassociate expressions.
-TheFPM->addPass(ReassociatePass());
-...
-```
-
-It is interesting to see what the code looks like before and after the
-mem2reg optimization runs. For example, this is the before/after code
-for our recursive fib function. Before the optimization:
-
-```llvm
-define double @fib(double %x) {
-entry:
-  %x1 = alloca double
-  store double %x, double* %x1
-  %x2 = load double, double* %x1
-  %cmptmp = fcmp ult double %x2, 3.000000e+00
-  %booltmp = uitofp i1 %cmptmp to double
-  %ifcond = fcmp one double %booltmp, 0.000000e+00
-  br i1 %ifcond, label %then, label %else
-
-then:       ; preds = %entry
-  br label %ifcont
-
-else:       ; preds = %entry
-  %x3 = load double, double* %x1
-  %subtmp = fsub double %x3, 1.000000e+00
-  %calltmp = call double @fib(double %subtmp)
-  %x4 = load double, double* %x1
-  %subtmp5 = fsub double %x4, 2.000000e+00
-  %calltmp6 = call double @fib(double %subtmp5)
-  %addtmp = fadd double %calltmp, %calltmp6
-  br label %ifcont
-
-ifcont:     ; preds = %else, %then
-  %iftmp = phi double [ 1.000000e+00, %then ], [ %addtmp, %else ]
-  ret double %iftmp
+NamedValues.clear();
+unsigned Index = 0;
+for (BlockArgument Argument : TheFunction.getArguments()) {
+  Value Storage = CreateEntryBlockStorage();
+  TheBuilder->create<memref::StoreOp>(getLocation(), Argument, Storage,
+                                      ValueRange{});
+  NamedValues[P.getArgs()[Index++]] = Storage;
 }
 ```
 
-Here there is only one variable (x, the input argument) but you can
-still see the extremely simple-minded code generation strategy we are
-using. In the entry block, an alloca is created, and the initial input
-value is stored into it. Each reference to the variable does a reload
-from the stack. Also, note that we didn't modify the if/then/else
-expression, so it still inserts a PHI node. While we could make an
-alloca for it, it is actually easier to create a PHI node for it, so we
-still just make the PHI.
+Finally, the lowering pipeline converts structured control flow to blocks and
+runs MLIR's `mem2reg` pass before lowering the remaining operations to the LLVM
+dialect:
 
-Here is the code after the mem2reg pass runs:
-
-```llvm
-define double @fib(double %x) {
-entry:
-  %cmptmp = fcmp ult double %x, 3.000000e+00
-  %booltmp = uitofp i1 %cmptmp to double
-  %ifcond = fcmp one double %booltmp, 0.000000e+00
-  br i1 %ifcond, label %then, label %else
-
-then:
-  br label %ifcont
-
-else:
-  %subtmp = fsub double %x, 1.000000e+00
-  %calltmp = call double @fib(double %subtmp)
-  %subtmp5 = fsub double %x, 2.000000e+00
-  %calltmp6 = call double @fib(double %subtmp5)
-  %addtmp = fadd double %calltmp, %calltmp6
-  br label %ifcont
-
-ifcont:     ; preds = %else, %then
-  %iftmp = phi double [ 1.000000e+00, %then ], [ %addtmp, %else ]
-  ret double %iftmp
-}
+```cpp
+PassManager LoweringPM(TheContext.get());
+LoweringPM.addPass(createSCFToControlFlowPass());
+LoweringPM.addPass(createMem2Reg());
+LoweringPM.addPass(createConvertFuncToLLVMPass());
+LoweringPM.addPass(createArithToLLVMConversionPass());
+LoweringPM.addPass(createFinalizeMemRefToLLVMConversionPass());
+LoweringPM.addPass(createConvertControlFlowToLLVMPass());
+LoweringPM.addPass(createReconcileUnrealizedCastsPass());
 ```
 
-This is a trivial case for mem2reg, since there are no redefinitions of
-the variable. The point of showing this is to calm your tension about
-inserting such blatant inefficiencies :).
-
-After the rest of the optimizers run, we get:
-
-```llvm
-define double @fib(double %x) {
-entry:
-  %cmptmp = fcmp ult double %x, 3.000000e+00
-  %booltmp = uitofp i1 %cmptmp to double
-  %ifcond = fcmp ueq double %booltmp, 0.000000e+00
-  br i1 %ifcond, label %else, label %ifcont
-
-else:
-  %subtmp = fsub double %x, 1.000000e+00
-  %calltmp = call double @fib(double %subtmp)
-  %subtmp5 = fsub double %x, 2.000000e+00
-  %calltmp6 = call double @fib(double %subtmp5)
-  %addtmp = fadd double %calltmp, %calltmp6
-  ret double %addtmp
-
-ifcont:
-  ret double 1.000000e+00
-}
-```
-
-Here we see that the simplifycfg pass decided to clone the return
-instruction into the end of the 'else' block. This allowed it to
-eliminate some branches and the PHI node.
-
-Now that all symbol table references are updated to use stack variables,
-we'll add the assignment operator.
+Now all variable references consistently go through mutable storage, while the
+promotion pass can recover SSA values before translation to LLVM IR.
 
 ## New Assignment Operator
 
-With our current framework, adding a new assignment operator is really
-simple. We will parse it just like any other binary operator, but handle
-it internally (instead of allowing the user to define it). The first
-step is to set a precedence:
+With our current framework, adding an assignment operator is simple. We parse
+it like any other binary operator, but handle it internally instead of allowing
+the user to define it. First we give it a low precedence:
 
 ```cpp
 int main() {
@@ -558,60 +427,41 @@ int main() {
   BinopPrecedence['-'] = 20;
 ```
 
-Now that the parser knows the precedence of the binary operator, it
-takes care of all the parsing and AST generation. We just need to
-implement codegen for the assignment operator. This looks like:
+Assignment cannot follow the usual “emit the LHS, emit the RHS, perform the
+operation” pattern because evaluating the LHS would load its value. Instead,
+we ask whether the left-hand expression names a variable, generate the new
+value, and store it into that variable's memref:
 
 ```cpp
-Value *BinaryExprAST::codegen() {
-  // Special case '=' because we don't want to emit the LHS as an expression.
+Value BinaryExprAST::codegen() {
+  // Assignment stores into the variable's mutable memref slot.
   if (Op == '=') {
-    // This assume we're building without RTTI because LLVM builds that way by
-    // default. If you build LLVM with RTTI this can be changed to a
-    // dynamic_cast for automatic error checking.
-    VariableExprAST *LHSE = static_cast<VariableExprAST*>(LHS.get());
-    if (!LHSE)
+    const std::string *Name = LHS->getVariableName();
+    if (!Name)
       return LogErrorV("destination of '=' must be a variable");
+
+    Value AssignedValue = RHS->codegen();
+    if (!AssignedValue)
+      return {};
+
+    auto It = NamedValues.find(*Name);
+    if (It == NamedValues.end())
+      return LogErrorV("Unknown variable name");
+
+    TheBuilder->create<memref::StoreOp>(getLocation(), AssignedValue,
+                                        It->second, ValueRange{});
+    return AssignedValue;
+  }
 ```
 
-Unlike the rest of the binary operators, our assignment operator doesn't
-follow the "emit LHS, emit RHS, do computation" model. As such, it is
-handled as a special case before the other binary operators are handled.
-The other strange thing is that it requires the LHS to be a variable. It
-is invalid to have "(x+1) = expr" - only things like "x = expr" are
-allowed.
+Returning the assigned value permits chained assignments such as
+`x = (y = z)`. We can now mutate loop variables and function arguments:
 
-```cpp
-  // Codegen the RHS.
-  Value *Val = RHS->codegen();
-  if (!Val)
-    return nullptr;
-
-  // Look up the name.
-  AllocaInst *Alloca = NamedValues[LHSE->getName()];
-  if (!Alloca)
-    return LogErrorV("Unknown variable name");
-
-  Builder->CreateStore(Val, Alloca);
-  return Val;
-}
-...
-```
-
-Once we have the variable, codegen'ing the assignment is
-straightforward: we emit the RHS of the assignment, create a store, and
-return the computed value. Returning a value allows for chained
-assignments like "X = (Y = Z)".
-
-Now that we have an assignment operator, we can mutate loop variables
-and arguments. For example, we can now run code like this:
-
-```
+```kaleidoscope
 # Function to print a double.
 extern printd(x);
 
-# Define ':' for sequencing: as a low-precedence operator that ignores operands
-# and just returns the RHS.
+# Define ':' for sequencing.
 def binary : 1 (x y) y;
 
 def test(x)
@@ -622,11 +472,8 @@ def test(x)
 test(123);
 ```
 
-When run, this example prints "123" and then "4", showing that we did
-actually mutate the value! Okay, we have now officially implemented our
-goal: getting this to work requires SSA construction in the general
-case. However, to be really useful, we want the ability to define our
-own local variables, let's add this next!
+When run, this prints `123` and then `4`. We can mutate existing variables;
+next we will add declarations for new local variables.
 
 ## User-defined Local Variables
 
@@ -668,11 +515,12 @@ class VarExprAST : public ExprAST {
   std::unique_ptr<ExprAST> Body;
 
 public:
-  VarExprAST(std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames,
-             std::unique_ptr<ExprAST> Body)
-    : VarNames(std::move(VarNames)), Body(std::move(Body)) {}
+  VarExprAST(
+      std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames,
+      std::unique_ptr<ExprAST> Body)
+      : VarNames(std::move(VarNames)), Body(std::move(Body)) {}
 
-  Value *codegen() override;
+  Value codegen() override;
 };
 ```
 
@@ -718,11 +566,9 @@ Next we define ParseVarExpr:
 /// varexpr ::= 'var' identifier ('=' expression)?
 //                    (',' identifier ('=' expression)?)* 'in' expression
 static std::unique_ptr<ExprAST> ParseVarExpr() {
-  getNextToken();  // eat the var.
+  getNextToken(); // eat the var.
 
   std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames;
-
-  // At least one variable name is required.
   if (CurTok != tok_identifier)
     return LogError("expected identifier after var");
 ```
@@ -733,23 +579,21 @@ into the local `VarNames` vector.
 ```cpp
 while (true) {
   std::string Name = IdentifierStr;
-  getNextToken();  // eat identifier.
+  getNextToken(); // eat identifier.
 
-  // Read the optional initializer.
   std::unique_ptr<ExprAST> Init;
   if (CurTok == '=') {
-    getNextToken(); // eat the '='.
-
+    getNextToken(); // eat '='.
     Init = ParseExpression();
-    if (!Init) return nullptr;
+    if (!Init)
+      return nullptr;
   }
 
-  VarNames.push_back(std::make_pair(Name, std::move(Init)));
+  VarNames.emplace_back(Name, std::move(Init));
 
-  // End of var list, exit loop.
-  if (CurTok != ',') break;
-  getNextToken(); // eat the ','.
-
+  if (CurTok != ',')
+    break;
+  getNextToken(); // eat ','.
   if (CurTok != tok_identifier)
     return LogError("expected identifier list after var");
 }
@@ -759,98 +603,74 @@ Once all the variables are parsed, we then parse the body and create the
 AST node:
 
 ```cpp
-  // At this point, we have to have 'in'.
   if (CurTok != tok_in)
     return LogError("expected 'in' keyword after 'var'");
-  getNextToken();  // eat 'in'.
+  getNextToken(); // eat 'in'.
 
   auto Body = ParseExpression();
   if (!Body)
     return nullptr;
 
-  return std::make_unique<VarExprAST>(std::move(VarNames),
-                                       std::move(Body));
+  return std::make_unique<VarExprAST>(std::move(VarNames), std::move(Body));
 }
 ```
 
-Now that we can parse and represent the code, we need to support
-emission of LLVM IR for it. This code starts out with:
+Now that we can parse and represent the code, we generate mutable storage for
+each local variable:
 
 ```cpp
-Value *VarExprAST::codegen() {
-  std::vector<AllocaInst *> OldBindings;
+Value VarExprAST::codegen() {
+  std::vector<std::pair<std::string, std::optional<Value>>> OldBindings;
 
-  Function *TheFunction = Builder->GetInsertBlock()->getParent();
+  auto RestoreBindings = [&]() {
+    for (auto It = OldBindings.rbegin(); It != OldBindings.rend(); ++It) {
+      if (It->second)
+        NamedValues[It->first] = *It->second;
+      else
+        NamedValues.erase(It->first);
+    }
+  };
 
-  // Register all variables and emit their initializer.
-  for (unsigned i = 0, e = VarNames.size(); i != e; ++i) {
-    const std::string &VarName = VarNames[i].first;
-    ExprAST *Init = VarNames[i].second.get();
-```
+  for (auto &Variable : VarNames) {
+    const std::string &Name = Variable.first;
 
-Basically it loops over all the variables, installing them one at a
-time. For each variable we put into the symbol table, we remember the
-previous value that we replace in OldBindings.
+    // Generate the initializer before introducing the new binding.
+    Value InitialValue;
+    if (Variable.second)
+      InitialValue = Variable.second->codegen();
+    else
+      InitialValue = TheBuilder->create<arith::ConstantOp>(
+          getLocation(), TheBuilder->getF64FloatAttr(0.0));
+    if (!InitialValue) {
+      RestoreBindings();
+      return {};
+    }
 
-```cpp
-  // Emit the initializer before adding the variable to scope, this prevents
-  // the initializer from referencing the variable itself, and permits stuff
-  // like this:
-  //  var a = 1 in
-  //    var a = a in ...   # refers to outer 'a'.
-  Value *InitVal;
-  if (Init) {
-    InitVal = Init->codegen();
-    if (!InitVal)
-      return nullptr;
-  } else { // If not specified, use 0.0.
-    InitVal = ConstantFP::get(*TheContext, APFloat(0.0));
+    Value Storage = CreateEntryBlockStorage();
+    TheBuilder->create<memref::StoreOp>(getLocation(), InitialValue, Storage,
+                                        ValueRange{});
+
+    auto Old = NamedValues.find(Name);
+    OldBindings.emplace_back(
+        Name, Old == NamedValues.end() ? std::optional<Value>()
+                                      : std::optional<Value>(Old->second));
+    NamedValues[Name] = Storage;
   }
 
-  AllocaInst *Alloca = CreateEntryBlockAlloca(TheFunction, VarName);
-  Builder->CreateStore(InitVal, Alloca);
-
-  // Remember the old variable binding so that we can restore the binding when
-  // we unrecurse.
-  OldBindings.push_back(NamedValues[VarName]);
-
-  // Remember this binding.
-  NamedValues[VarName] = Alloca;
+  Value BodyValue = Body->codegen();
+  RestoreBindings();
+  return BodyValue;
 }
 ```
 
-There are more comments here than code. The basic idea is that we emit
-the initializer, create the alloca, then update the symbol table to
-point to it. Once all the variables are installed in the symbol table,
-we evaluate the body of the var/in expression:
+The initializer is generated before the new name is installed, so an inner
+declaration such as `var a = a in ...` reads the outer `a`. We remember every
+previous binding and restore them in reverse order when the body is finished.
 
-```cpp
-// Codegen the body, now that all vars are in scope.
-Value *BodyVal = Body->codegen();
-if (!BodyVal)
-  return nullptr;
-```
-
-Finally, before returning, we restore the previous variable bindings:
-
-```cpp
-  // Pop all our variables from scope.
-  for (unsigned i = 0, e = VarNames.size(); i != e; ++i)
-    NamedValues[VarNames[i].first] = OldBindings[i];
-
-  // Return the body computation.
-  return BodyVal;
-}
-```
-
-The end result of all of this is that we get properly scoped variable
-definitions, and we even (trivially) allow mutation of them :).
-
-With this, we completed what we set out to do. Our nice iterative fib
-example from the intro compiles and runs just fine. The mem2reg pass
-optimizes all of our stack variables into SSA registers, inserting PHI
-nodes where needed, and our front-end remains simple: no "iterated
-dominance frontier" computation anywhere in sight.
+With this, the iterative Fibonacci example from the introduction compiles and
+runs. The frontend expresses mutation with straightforward memory operations;
+MLIR's `mem2reg` pass promotes those operations into SSA values and introduces
+block arguments where different control-flow paths meet.
 
 ## Full Code Listing
 

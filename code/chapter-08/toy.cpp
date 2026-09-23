@@ -766,8 +766,8 @@ static func::FuncOp getCurrentFunction() {
   return Parent->getParentOfType<func::FuncOp>();
 }
 
-/// CreateEntryBlockAlloca - Create mutable storage in the function entry block.
-static Value CreateEntryBlockAlloca() {
+/// CreateEntryBlockStorage - Create mutable storage in the function entry block.
+static Value CreateEntryBlockStorage() {
   func::FuncOp Function = getCurrentFunction();
   OpBuilder::InsertionGuard Guard(*TheBuilder);
   TheBuilder->setInsertionPointToStart(&Function.front());
@@ -921,7 +921,7 @@ Value ForExprAST::codegen() {
   if (!StartVal)
     return {};
 
-  Value Variable = CreateEntryBlockAlloca();
+  Value Variable = CreateEntryBlockStorage();
   TheBuilder->create<memref::StoreOp>(getLocation(), StartVal, Variable,
                                       ValueRange{});
 
@@ -1013,7 +1013,7 @@ Value VarExprAST::codegen() {
       return {};
     }
 
-    Value Storage = CreateEntryBlockAlloca();
+    Value Storage = CreateEntryBlockStorage();
     TheBuilder->create<memref::StoreOp>(getLocation(), InitialValue, Storage,
                                         ValueRange{});
 
@@ -1070,7 +1070,7 @@ func::FuncOp FunctionAST::codegen() {
   NamedValues.clear();
   unsigned Index = 0;
   for (BlockArgument Argument : TheFunction.getArguments()) {
-    Value Storage = CreateEntryBlockAlloca();
+    Value Storage = CreateEntryBlockStorage();
     TheBuilder->create<memref::StoreOp>(getLocation(), Argument, Storage,
                                         ValueRange{});
     NamedValues[P.getArgs()[Index++]] = Storage;
@@ -1138,6 +1138,7 @@ lowerToLLVM(const llvm::DataLayout &DataLayout) {
   // Lower the high-level MLIR operations to the LLVM dialect.
   PassManager LoweringPM(TheContext.get());
   LoweringPM.addPass(createSCFToControlFlowPass());
+  LoweringPM.addPass(createMem2Reg());
   LoweringPM.addPass(createConvertFuncToLLVMPass());
   LoweringPM.addPass(createArithToLLVMConversionPass());
   LoweringPM.addPass(createFinalizeMemRefToLLVMConversionPass());

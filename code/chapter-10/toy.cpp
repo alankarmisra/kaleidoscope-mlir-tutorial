@@ -1,8 +1,12 @@
+// toy.cpp
+
 #include "../include/KaleidoscopeJIT.h"
+#include "KaleidoscopeDebugInfo.h"
 #include "KaleidoscopeDialect.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
+#include "mlir/Conversion/LLVMCommon/TypeConverter.h"
 #include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"
@@ -18,13 +22,12 @@
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/IR/Verifier.h"
-#include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Target/LLVMIR/Dialect/Builtin/BuiltinToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"
 #include "mlir/Target/LLVMIR/Export.h"
-#include "mlir/Transforms/Passes.h"
 #include "mlir/Transforms/DialectConversion.h"
+#include "mlir/Transforms/Passes.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/IR/LLVMContext.h"
@@ -277,9 +280,8 @@ class ForExprAST : public ExprAST {
 
 public:
   ForExprAST(SourceLocation Loc, const std::string &VarName,
-             std::unique_ptr<ExprAST> Start,
-             std::unique_ptr<ExprAST> End, std::unique_ptr<ExprAST> Step,
-             std::unique_ptr<ExprAST> Body)
+             std::unique_ptr<ExprAST> Start, std::unique_ptr<ExprAST> End,
+             std::unique_ptr<ExprAST> Step, std::unique_ptr<ExprAST> Body)
       : ExprAST(Loc), VarName(VarName), Start(std::move(Start)),
         End(std::move(End)), Step(std::move(Step)), Body(std::move(Body)) {}
 
@@ -292,7 +294,8 @@ class VarExprAST : public ExprAST {
   std::unique_ptr<ExprAST> Body;
 
 public:
-  VarExprAST(SourceLocation Loc,
+  VarExprAST(
+      SourceLocation Loc,
       std::vector<std::pair<std::string, std::unique_ptr<ExprAST>>> VarNames,
       std::unique_ptr<ExprAST> Body)
       : ExprAST(Loc), VarNames(std::move(VarNames)), Body(std::move(Body)) {}
@@ -760,19 +763,18 @@ static std::unique_ptr<PassManager> ThePM;
 static std::map<std::string, Value> NamedValues;
 static std::unique_ptr<llvm::orc::KaleidoscopeJIT> TheJIT;
 static std::map<std::string, std::unique_ptr<PrototypeAST>> FunctionProtos;
-static std::map<std::string, std::vector<std::string>> FunctionParameters;
 static llvm::ExitOnError ExitOnErr;
-static llvm::cl::opt<bool> DumpMLIR(
-    "dump-mlir", llvm::cl::desc("Print generated MLIR"),
+static llvm::cl::opt<bool> DumpMLIR("dump-mlir",
+                                    llvm::cl::desc("Print generated MLIR"),
+                                    llvm::cl::init(false));
+static llvm::cl::opt<bool> EmitObject(
+    "emit-object",
+    llvm::cl::desc(
+        "Compile an input file to an object instead of using the JIT"),
     llvm::cl::init(false));
-static llvm::cl::opt<bool>
-    EmitObject("emit-object",
-               llvm::cl::desc(
-                   "Compile an input file to an object instead of using the JIT"),
-               llvm::cl::init(false));
-static llvm::cl::opt<std::string>
-    InputFilename(llvm::cl::Positional, llvm::cl::desc("<input file>"),
-                  llvm::cl::init(""));
+static llvm::cl::opt<std::string> InputFilename(llvm::cl::Positional,
+                                                llvm::cl::desc("<input file>"),
+                                                llvm::cl::init(""));
 static llvm::cl::opt<std::string>
     TargetTripleOption("target",
                        llvm::cl::desc("Target triple for object emission"),
@@ -785,8 +787,8 @@ static llvm::cl::opt<char>
              llvm::cl::Prefix, llvm::cl::init('2'));
 static llvm::cl::opt<bool>
     DumpLLVMIR("dump-llvm-ir",
-             llvm::cl::desc("Print LLVM IR before emitting the object file"),
-             llvm::cl::init(false));
+               llvm::cl::desc("Print LLVM IR before emitting the object file"),
+               llvm::cl::init(false));
 
 static SourceLocation CodegenLoc = {1, 1};
 
@@ -836,13 +838,13 @@ static func::FuncOp getCurrentFunction() {
   return Parent->getParentOfType<func::FuncOp>();
 }
 
-/// CreateEntryBlockAlloca - Create mutable storage in the function entry block.
-static Value CreateEntryBlockAlloca() {
-  func::FuncOp Function = getCurrentFunction();
-  OpBuilder::InsertionGuard Guard(*TheBuilder);
-  TheBuilder->setInsertionPointToStart(&Function.front());
-  auto VariableType = MemRefType::get({}, TheBuilder->getF64Type());
-  return TheBuilder->create<memref::AllocaOp>(getLocation(), VariableType);
+/// CreateVariable - Preserve a source variable until dialect lowering.
+static Value CreateVariable(StringRef Name, Value InitialValue,
+                            int64_t ArgumentNumber = 0) {
+  return TheBuilder->create<kaleidoscope::DeclareOp>(
+      getLocation(), kaleidoscope::VariableType::get(TheContext.get()),
+      InitialValue, TheBuilder->getStringAttr(Name),
+      TheBuilder->getI64IntegerAttr(ArgumentNumber));
 }
 
 Value NumberExprAST::codegen() {
@@ -858,8 +860,8 @@ Value VariableExprAST::codegen() {
   if (It == NamedValues.end())
     return LogErrorV("Unknown variable name");
 
-  return TheBuilder->create<memref::LoadOp>(getLocation(), It->second,
-                                             ValueRange{});
+  return TheBuilder->create<kaleidoscope::ReadOp>(
+      getLocation(), TheBuilder->getF64Type(), It->second);
 }
 
 Value UnaryExprAST::codegen() {
@@ -892,8 +894,8 @@ Value BinaryExprAST::codegen() {
     if (It == NamedValues.end())
       return LogErrorV("Unknown variable name");
 
-    TheBuilder->create<memref::StoreOp>(getLocation(), AssignedValue,
-                                        It->second, ValueRange{});
+    TheBuilder->create<kaleidoscope::AssignOp>(getLocation(), It->second,
+                                               AssignedValue);
     return AssignedValue;
   }
 
@@ -902,13 +904,32 @@ Value BinaryExprAST::codegen() {
   if (!L || !R)
     return {};
 
-  StringRef Operator(&Op, 1);
-  if (Operator != "+" && Operator != "-" && Operator != "*" &&
-      Operator != "<" && !getFunction("binary" + Operator.str()))
+  switch (Op) {
+  case '+':
+    return TheBuilder->create<arith::AddFOp>(getLocation(), L, R);
+  case '-':
+    return TheBuilder->create<arith::SubFOp>(getLocation(), L, R);
+  case '*':
+    return TheBuilder->create<arith::MulFOp>(getLocation(), L, R);
+  case '<': {
+    Value Comparison = TheBuilder->create<arith::CmpFOp>(
+        getLocation(), arith::CmpFPredicate::ULT, L, R);
+    // Convert bool 0/1 to double 0.0 or 1.0.
+    return TheBuilder->create<arith::UIToFPOp>(
+        getLocation(), TheBuilder->getF64Type(), Comparison);
+  }
+  default:
+    break;
+  }
+
+  // If it wasn't a builtin binary operator, it must be a user-defined one.
+  auto Operator = getFunction(std::string("binary") + Op);
+  if (!Operator)
     return LogErrorV("Unknown binary operator");
 
-  return TheBuilder->create<kaleidoscope::BinaryOp>(
-      getLocation(), Operator, L, R);
+  Value Operands[] = {L, R};
+  return TheBuilder->create<func::CallOp>(getLocation(), Operator, Operands)
+      .getResult(0);
 }
 
 Value CallExprAST::codegen() {
@@ -979,9 +1000,7 @@ Value ForExprAST::codegen() {
   if (!StartVal)
     return {};
 
-  Value Variable = CreateEntryBlockAlloca();
-  TheBuilder->create<memref::StoreOp>(getLocation(), StartVal, Variable,
-                                      ValueRange{});
+  Value Variable = CreateVariable(VarName, StartVal);
 
   auto OldValue = NamedValues.find(VarName);
   bool HadOldValue = OldValue != NamedValues.end();
@@ -1023,10 +1042,10 @@ Value ForExprAST::codegen() {
         }
 
         // Reload after the body and step in case either mutated the variable.
-        Value Current =
-            Builder.create<memref::LoadOp>(Loc, Variable, ValueRange{});
+        Value Current = Builder.create<kaleidoscope::ReadOp>(
+            Loc, Builder.getF64Type(), Variable);
         Value NextVar = Builder.create<arith::AddFOp>(Loc, Current, StepVal);
-        Builder.create<memref::StoreOp>(Loc, NextVar, Variable, ValueRange{});
+        Builder.create<kaleidoscope::AssignOp>(Loc, Variable, NextVar);
         Builder.create<scf::YieldOp>(Loc);
       });
 
@@ -1072,14 +1091,12 @@ Value VarExprAST::codegen() {
       return {};
     }
 
-    Value Storage = CreateEntryBlockAlloca();
-    TheBuilder->create<memref::StoreOp>(getLocation(), InitialValue, Storage,
-                                        ValueRange{});
+    Value Storage = CreateVariable(Name, InitialValue);
 
     auto Old = NamedValues.find(Name);
-    OldBindings.emplace_back(
-        Name, Old == NamedValues.end() ? std::optional<Value>()
-                                      : std::optional<Value>(Old->second));
+    OldBindings.emplace_back(Name, Old == NamedValues.end()
+                                       ? std::optional<Value>()
+                                       : std::optional<Value>(Old->second));
     NamedValues[Name] = Storage;
   }
 
@@ -1104,7 +1121,6 @@ func::FuncOp FunctionAST::codegen() {
   // Save the prototype so declarations can be emitted in later modules.
   auto &P = *Proto;
   LocationGuard Guard(P.getSourceLocation());
-  FunctionParameters[P.getName()] = P.getArgs();
   FunctionProtos[Proto->getName()] = std::move(Proto);
   auto TheFunction = getFunction(P.getName());
 
@@ -1132,10 +1148,10 @@ func::FuncOp FunctionAST::codegen() {
   NamedValues.clear();
   unsigned Index = 0;
   for (BlockArgument Argument : TheFunction.getArguments()) {
-    Value Storage = CreateEntryBlockAlloca();
-    TheBuilder->create<memref::StoreOp>(getLocation(), Argument, Storage,
-                                        ValueRange{});
-    NamedValues[P.getArgs()[Index++]] = Storage;
+    StringRef Name = P.getArgs()[Index];
+    Value Storage = CreateVariable(Name, Argument, Index + 1);
+    NamedValues[Name.str()] = Storage;
+    ++Index;
   }
 
   if (Value RetVal = Body->codegen()) {
@@ -1177,8 +1193,7 @@ static void InitializeModuleAndManagers() {
   // Open a new context and module.
   TheContext = std::make_unique<MLIRContext>();
   TheContext->loadDialect<arith::ArithDialect, cf::ControlFlowDialect,
-                          func::FuncDialect,
-                          kaleidoscope::KaleidoscopeDialect,
+                          func::FuncDialect, kaleidoscope::KaleidoscopeDialect,
                           memref::MemRefDialect, scf::SCFDialect>();
   TheModule = ModuleOp::create(UnknownLoc::get(TheContext.get()));
 
@@ -1198,216 +1213,104 @@ struct LoweredModule {
   std::unique_ptr<llvm::Module> Module;
 };
 
-namespace {
-class BinaryOpLowering
-    : public OpConversionPattern<kaleidoscope::BinaryOp> {
+class DeclareOpLowering : public OpConversionPattern<kaleidoscope::DeclareOp> {
 public:
   using OpConversionPattern::OpConversionPattern;
 
   LogicalResult
-  matchAndRewrite(kaleidoscope::BinaryOp Op, OpAdaptor Adaptor,
+  matchAndRewrite(kaleidoscope::DeclareOp Op, OpAdaptor Adaptor,
                   ConversionPatternRewriter &Rewriter) const override {
     Location Loc = Op.getLoc();
-    Value LHS = Adaptor.getLhs();
-    Value RHS = Adaptor.getRhs();
-    StringRef Operator = Op.getOperatorName();
+    Type DoubleType = Rewriter.getF64Type();
+    Type PointerType = LLVM::LLVMPointerType::get(Rewriter.getContext());
+    Value One = LLVM::ConstantOp::create(Rewriter, Loc, Rewriter.getI64Type(),
+                                         Rewriter.getI64IntegerAttr(1));
+    Value Address =
+        LLVM::AllocaOp::create(Rewriter, Loc, PointerType, DoubleType, One, 0);
+    LLVM::StoreOp::create(Rewriter, Loc, Adaptor.getInitialValue(), Address);
 
-    if (Operator == "+") {
-      Rewriter.replaceOpWithNewOp<arith::AddFOp>(Op, LHS, RHS);
-      return success();
-    }
-    if (Operator == "-") {
-      Rewriter.replaceOpWithNewOp<arith::SubFOp>(Op, LHS, RHS);
-      return success();
-    }
-    if (Operator == "*") {
-      Rewriter.replaceOpWithNewOp<arith::MulFOp>(Op, LHS, RHS);
-      return success();
-    }
-    if (Operator == "<") {
-      Value Comparison = Rewriter.create<arith::CmpFOp>(
-          Loc, arith::CmpFPredicate::ULT, LHS, RHS);
-      Rewriter.replaceOpWithNewOp<arith::UIToFPOp>(
-          Op, Rewriter.getF64Type(), Comparison);
-      return success();
-    }
+    auto Function = Op->getParentOfType<LLVM::LLVMFuncOp>();
+    auto ScopeLoc =
+        Function.getLoc()
+            ->findInstanceOf<FusedLocWith<LLVM::DISubprogramAttr>>();
+    if (!ScopeLoc)
+      return Rewriter.notifyMatchFailure(Op, "function has no debug scope");
 
-    std::string FunctionName = "binary" + Operator.str();
-    auto Module = Op->getParentOfType<ModuleOp>();
-    auto Function = Module.lookupSymbol<func::FuncOp>(FunctionName);
-    if (!Function)
-      return Rewriter.notifyMatchFailure(Op,
-                                         "unknown user-defined operator");
+    LLVM::DISubprogramAttr Scope = ScopeLoc.getMetadata();
+    int64_t Line = Scope.getLine();
+    if (auto FileLoc = Loc->findInstanceOf<FileLineColLoc>())
+      Line = FileLoc.getLine();
+    auto VariableType = LLVM::DIBasicTypeAttr::get(
+        Rewriter.getContext(), llvm::dwarf::DW_TAG_base_type, "double", 64,
+        llvm::dwarf::DW_ATE_float);
+    auto Variable = LLVM::DILocalVariableAttr::get(
+        Scope, Op.getName(), Scope.getFile(), Line, Op.getArgumentNumber(),
+        /*alignInBits=*/0, VariableType, LLVM::DIFlags::Zero);
+    LLVM::DbgDeclareOp::create(
+        Rewriter, Loc, Address, Variable,
+        LLVM::DIExpressionAttr::get(Rewriter.getContext()));
 
-    Rewriter.replaceOpWithNewOp<func::CallOp>(Op, Function,
-                                               ValueRange{LHS, RHS});
+    Rewriter.replaceOp(Op, Address);
     return success();
   }
 };
 
-class LowerKaleidoscopePass
-    : public PassWrapper<LowerKaleidoscopePass, OperationPass<ModuleOp>> {
+class ReadOpLowering : public OpConversionPattern<kaleidoscope::ReadOp> {
 public:
-  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerKaleidoscopePass)
+  using OpConversionPattern::OpConversionPattern;
 
-  StringRef getArgument() const final { return "lower-kaleidoscope"; }
-  StringRef getDescription() const final {
-    return "Lower Kaleidoscope operations to standard MLIR dialects";
+  LogicalResult
+  matchAndRewrite(kaleidoscope::ReadOp Op, OpAdaptor Adaptor,
+                  ConversionPatternRewriter &Rewriter) const override {
+    Rewriter.replaceOpWithNewOp<LLVM::LoadOp>(Op, Rewriter.getF64Type(),
+                                              Adaptor.getVariable());
+    return success();
   }
+};
+
+class AssignOpLowering : public OpConversionPattern<kaleidoscope::AssignOp> {
+public:
+  using OpConversionPattern::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(kaleidoscope::AssignOp Op, OpAdaptor Adaptor,
+                  ConversionPatternRewriter &Rewriter) const override {
+    Rewriter.replaceOpWithNewOp<LLVM::StoreOp>(Op, Adaptor.getValue(),
+                                               Adaptor.getVariable());
+    return success();
+  }
+};
+
+class LowerKaleidoscopeVariablesPass
+    : public PassWrapper<LowerKaleidoscopeVariablesPass,
+                         OperationPass<ModuleOp>> {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(LowerKaleidoscopeVariablesPass)
 
   void runOnOperation() override {
     MLIRContext &Context = getContext();
+    LLVMTypeConverter Converter(&Context);
+    Converter.addConversion([](kaleidoscope::VariableType InputType) -> Type {
+      return LLVM::LLVMPointerType::get(InputType.getContext());
+    });
+
     ConversionTarget Target(Context);
     Target.addIllegalDialect<kaleidoscope::KaleidoscopeDialect>();
     Target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
 
     RewritePatternSet Patterns(&Context);
-    Patterns.add<BinaryOpLowering>(&Context);
+    Patterns.add<DeclareOpLowering, ReadOpLowering, AssignOpLowering>(Converter,
+                                                                      &Context);
     if (failed(applyPartialConversion(getOperation(), Target,
                                       std::move(Patterns))))
       signalPassFailure();
   }
 };
-} // namespace
-
-static Value findUnderlyingAlloca(Value V) {
-  Operation *DefiningOp = V.getDefiningOp();
-  if (!DefiningOp)
-    return {};
-  if (isa<LLVM::AllocaOp>(DefiningOp))
-    return V;
-  for (Value Operand : DefiningOp->getOperands())
-    if (Value Alloca = findUnderlyingAlloca(Operand))
-      return Alloca;
-  return {};
-}
-
-static void addDebugInfoScopes(ModuleOp Module) {
-  MLIRContext *Context = Module.getContext();
-  llvm::StringRef InputPath = InputFilename.getValue();
-  auto File = InputPath.empty()
-                  ? LLVM::DIFileAttr::get(Context, "<stdin>", "")
-                  : LLVM::DIFileAttr::get(
-                        Context, llvm::sys::path::filename(InputPath),
-                        llvm::sys::path::parent_path(InputPath));
-  auto CompileUnit = LLVM::DICompileUnitAttr::get(
-      DistinctAttr::create(UnitAttr::get(Context)), llvm::dwarf::DW_LANG_C,
-      File, StringAttr::get(Context, "Kaleidoscope"),
-      /*isOptimized=*/OptLevel != '0', LLVM::DIEmissionKind::Full);
-  Module->setLoc(FusedLoc::get(Context, {Module.getLoc()}, CompileUnit));
-
-  for (LLVM::LLVMFuncOp Function : Module.getOps<LLVM::LLVMFuncOp>()) {
-    Location OriginalLoc = Function.getLoc();
-    LLVM::DIFileAttr FunctionFile = File;
-    int64_t Line = 1;
-    if (auto FileLoc = OriginalLoc->findInstanceOf<FileLineColLoc>()) {
-      llvm::StringRef FunctionPath = FileLoc.getFilename().getValue();
-      FunctionFile = LLVM::DIFileAttr::get(
-          Context, llvm::sys::path::filename(FunctionPath),
-          llvm::sys::path::parent_path(FunctionPath));
-      Line = FileLoc.getLine();
-    }
-
-    DistinctAttr Id;
-    LLVM::DICompileUnitAttr FunctionCompileUnit = CompileUnit;
-    auto Flags = static_cast<LLVM::DISubprogramFlags>(0);
-    if (OptLevel != '0')
-      Flags = Flags | LLVM::DISubprogramFlags::Optimized;
-    if (Function.isExternal()) {
-      FunctionCompileUnit = {};
-    } else {
-      Id = DistinctAttr::create(UnitAttr::get(Context));
-      Flags = Flags | LLVM::DISubprogramFlags::Definition;
-    }
-
-    auto FunctionType = LLVM::DISubroutineTypeAttr::get(
-        Context, llvm::dwarf::DW_CC_normal, {});
-    auto Name = Function.getNameAttr();
-    auto Scope = LLVM::DISubprogramAttr::get(
-        Context, Id, FunctionCompileUnit, FunctionFile, Name, Name,
-        FunctionFile, Line, Line, Flags, FunctionType,
-        /*retainedNodes=*/{}, /*annotations=*/{});
-    Function->setLoc(FusedLoc::get(Context, {OriginalLoc}, Scope));
-  }
-}
-
-static void addParameterDebugInfo(ModuleOp Module) {
-  // Get the context used to create LLVM dialect debug attributes.
-  MLIRContext *Context = Module.getContext();
-  // Describe every Kaleidoscope parameter as a 64-bit DWARF double.
-  auto DoubleType = LLVM::DIBasicTypeAttr::get(
-      Context, llvm::dwarf::DW_TAG_base_type, "double", 64,
-      llvm::dwarf::DW_ATE_float);
-  // Use each variable's address directly, without a DWARF transformation.
-  auto EmptyExpression = LLVM::DIExpressionAttr::get(Context);
-
-  // Add parameter information to every lowered LLVM function in the module.
-  for (LLVM::LLVMFuncOp Function : Module.getOps<LLVM::LLVMFuncOp>()) {
-    // Recover the source parameter names saved before lowering.
-    auto Names = FunctionParameters.find(Function.getName().str());
-    // Declarations have no body, and some functions may have no saved names.
-    if (Function.isExternal() || Names == FunctionParameters.end())
-      continue;
-
-    // Find the function's debug scope, attached before the debug-scope pass.
-    auto ScopeLoc = Function.getLoc()
-                        ->findInstanceOf<
-                            FusedLocWith<LLVM::DISubprogramAttr>>();
-    // A variable cannot be declared without a containing function scope.
-    if (!ScopeLoc)
-      continue;
-
-    // Extract the function description attached to its fused location.
-    LLVM::DISubprogramAttr Scope = ScopeLoc.getMetadata();
-
-    // Lowered function parameters are arguments of the entry block.
-    Block &EntryBlock = Function.getBody().front();
-    // Pair each zero-based block argument with its saved source name.
-    for (auto [ArgumentNumber, Name] : llvm::enumerate(Names->second)) {
-      // Stop if the saved parameter list is longer than the lowered list.
-      if (ArgumentNumber >= EntryBlock.getNumArguments())
-        break;
-
-      // Get the SSA value holding the incoming parameter.
-      BlockArgument Argument = EntryBlock.getArgument(ArgumentNumber);
-      // Find the store that copies this value into mutable stack storage.
-      LLVM::StoreOp ArgumentStore;
-      for (LLVM::StoreOp Store : EntryBlock.getOps<LLVM::StoreOp>()) {
-        // The matching store uses the block argument as its stored value.
-        if (Store.getValue() == Argument) {
-          ArgumentStore = Store;
-          break;
-        }
-      }
-      // A parameter without stack storage cannot use dbg.declare here.
-      if (!ArgumentStore)
-        continue;
-
-      // Describe the parameter's name, scope, position, and type to DWARF.
-      auto Variable = LLVM::DILocalVariableAttr::get(
-          Scope, Name, Scope.getFile(), Scope.getLine(), ArgumentNumber + 1,
-          /*alignInBits=*/0, DoubleType, LLVM::DIFlags::Zero);
-      // Recover the actual allocation hidden by the lowered memref descriptor.
-      Value VariableAddress = findUnderlyingAlloca(ArgumentStore.getAddr());
-      // Fall back to the store address if no underlying alloca was found.
-      if (!VariableAddress)
-        VariableAddress = ArgumentStore.getAddr();
-      // Insert the debug declaration immediately after the initial store.
-      OpBuilder Builder(ArgumentStore);
-      Builder.setInsertionPointAfter(ArgumentStore);
-      // Associate the source parameter description with its stack address.
-      Builder.create<LLVM::DbgDeclareOp>(ArgumentStore.getLoc(),
-                                         VariableAddress, Variable,
-                                         EmptyExpression);
-    }
-  }
-}
 
 static llvm::Expected<LoweredModule>
 lowerToLLVM(const llvm::DataLayout &DataLayout) {
   // Lower the high-level MLIR operations to the LLVM dialect.
   PassManager LoweringPM(TheContext.get());
-  LoweringPM.addPass(std::make_unique<LowerKaleidoscopePass>());
   LoweringPM.addPass(createSCFToControlFlowPass());
   LoweringPM.addPass(createConvertFuncToLLVMPass());
   LoweringPM.addPass(createArithToLLVMConversionPass());
@@ -1421,22 +1324,22 @@ lowerToLLVM(const llvm::DataLayout &DataLayout) {
         "could not lower module to the LLVM dialect",
         llvm::inconvertibleErrorCode());
 
-  // Create optimization-aware compile-unit and function scopes before asking
-  // MLIR to add the remaining scope information to operation locations.
-  addDebugInfoScopes(*TheModule);
+  // Add compile-unit and function scopes before lowering source variables.
+  PassManager DebugPM(TheContext.get());
+  DebugPM.addPass(
+      createKaleidoscopeDebugInfoPass(InputFilename.getValue(), OptLevel));
+
+  // Lower source variables while their names and locations are still present.
+  DebugPM.addPass(std::make_unique<LowerKaleidoscopeVariablesPass>());
+
+  // Fill in the remaining debug scopes on the lowered LLVM operations.
   LLVM::DIScopeForLLVMFuncOpPassOptions DebugOptions;
   DebugOptions.emissionKind = LLVM::DIEmissionKind::Full;
-  PassManager DebugPM(TheContext.get());
   DebugPM.addPass(
       LLVM::createDIScopeForLLVMFuncOpPass(std::move(DebugOptions)));
   if (failed(DebugPM.run(*TheModule)))
     return llvm::make_error<llvm::StringError>(
-        "could not add LLVM debug scopes",
-        llvm::inconvertibleErrorCode());
-
-  // Describe source parameters in the LLVM dialect while their lowered stack
-  // storage and MLIR debug scopes are still available.
-  addParameterDebugInfo(*TheModule);
+        "could not add LLVM debug scopes", llvm::inconvertibleErrorCode());
 
   // Register the translations from MLIR's LLVM dialect to LLVM IR.
   registerBuiltinDialectTranslation(*TheContext);
@@ -1476,7 +1379,6 @@ static void HandleDefinition() {
             std::move(Lowered.Module), std::move(Lowered.Context))));
         InitializeModuleAndManagers();
       }
-
     }
   } else {
     // Skip token for error recovery.
@@ -1648,10 +1550,9 @@ int main(int argc, char **argv) {
     return 0;
 
   // Select the host target and configure its object-file emitter.
-  std::string TargetTriple =
-      TargetTripleOption.empty()
-          ? llvm::sys::getDefaultTargetTriple()
-          : llvm::Triple::normalize(TargetTripleOption);
+  std::string TargetTriple = TargetTripleOption.empty()
+                                 ? llvm::sys::getDefaultTargetTriple()
+                                 : llvm::Triple::normalize(TargetTripleOption);
   std::string Error;
   const llvm::Target *Target =
       llvm::TargetRegistry::lookupTarget(TargetTriple, Error);
@@ -1663,10 +1564,18 @@ int main(int argc, char **argv) {
   llvm::TargetOptions Options;
   llvm::CodeGenOptLevel CodeGenOpt;
   switch (OptLevel) {
-  case '0': CodeGenOpt = llvm::CodeGenOptLevel::None; break;
-  case '1': CodeGenOpt = llvm::CodeGenOptLevel::Less; break;
-  case '2': CodeGenOpt = llvm::CodeGenOptLevel::Default; break;
-  case '3': CodeGenOpt = llvm::CodeGenOptLevel::Aggressive; break;
+  case '0':
+    CodeGenOpt = llvm::CodeGenOptLevel::None;
+    break;
+  case '1':
+    CodeGenOpt = llvm::CodeGenOptLevel::Less;
+    break;
+  case '2':
+    CodeGenOpt = llvm::CodeGenOptLevel::Default;
+    break;
+  case '3':
+    CodeGenOpt = llvm::CodeGenOptLevel::Aggressive;
+    break;
   }
   std::unique_ptr<llvm::TargetMachine> TargetMachine(
       Target->createTargetMachine(llvm::Triple(TargetTriple), "generic", "",
@@ -1698,8 +1607,8 @@ int main(int argc, char **argv) {
   }
 
   llvm::legacy::PassManager EmitPM;
-  if (TargetMachine->addPassesToEmitFile(
-          EmitPM, Dest, nullptr, llvm::CodeGenFileType::ObjectFile)) {
+  if (TargetMachine->addPassesToEmitFile(EmitPM, Dest, nullptr,
+                                         llvm::CodeGenFileType::ObjectFile)) {
     llvm::errs() << "Target machine cannot emit an object file\n";
     return 1;
   }

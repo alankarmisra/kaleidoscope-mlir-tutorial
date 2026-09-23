@@ -3,181 +3,144 @@
 ## Chapter 10 Introduction
 
 Welcome to Chapter 10 of the "[Implementing a language with
-MLIR](chapter-00.md)" tutorial. In the previous chapters, we generated
-operations from MLIR's existing dialects directly from our AST. This has
-served us well: `arith` represents our arithmetic, `func` represents our
-functions, `scf` represents our control flow, and `memref` provides storage
-for mutable variables.
+MLIR](chapter-00.md)" tutorial. So far, our AST has generated operations from
+MLIR's existing dialects directly. This has served us well: `arith` represents
+arithmetic, `func` represents functions, `scf` represents structured control
+flow, and `memref` provides storage for mutable variables.
 
-There are times, however, when the operations provided by existing dialects
-do not describe everything that the source language knows. Lowering that
-information immediately can make language-specific analysis and
-transformation more difficult. MLIR allows a language to define its own
-*dialect* and preserve these concepts until they are no longer useful.
+There are times, however, when those operations no longer describe everything
+the source language knows. In Chapter 9, lowering a variable to generic storage
+discarded its source name. We recovered that information later by walking the
+lowered IR. It worked, but it would be better not to lose the information in
+the first place.
 
-In this chapter, we'll add a small Kaleidoscope dialect containing one
-operation for binary operators. We won't change the Kaleidoscope language at
-all. Instead, we will change the initial MLIR it produces and add a pass that
-progressively lowers our new operation into the dialects we already use.
+In this chapter, we'll add a deliberately small Kaleidoscope dialect containing
+only the operations needed for mutable variables. The operations preserve a
+variable's name and source location until our own lowering pass has enough
+information to create both its storage and its debug declaration.
 
-## Why Preserve Binary Operators?
+We are not moving the whole language into a custom dialect. The
+[MLIR Toy tutorial](https://mlir.llvm.org/docs/Tutorials/Toy/) demonstrates
+that larger architecture. Here we only need enough dialect to solve the
+problem in front of us.
+
+## Why Preserve Variables?
 
 Consider this function:
 
 ```kaleidoscope
-def arithmetic(x y)
-  (x + y) * y;
+def test(x)
+  var y = x in
+    (y = y + 1) * y;
 ```
 
-Until now, `BinaryExprAST::codegen()` immediately selected an implementation
-for each operator. The `+` became `arith.addf`, `*` became `arith.mulf`, `<`
-became a comparison followed by a conversion, and a user-defined operator
-became a `func.call`.
+Previously, AST generation immediately turned `x` and `y` into anonymous
+`memref` storage. MLIR retained their source locations, but it no longer knew
+that the allocations represented variables named `x` and `y`. Chapter 9 saved
+the parameter names separately and reconstructed the connection after
+lowering.
 
-In this chapter, the initial MLIR looks like this:
+Our initial MLIR will now preserve that intent directly:
 
 ```mlir
-func.func @arithmetic(%arg0: f64, %arg1: f64) -> f64 {
-  // Loads from the mutable argument slots have been omitted here.
-  %0 = kaleidoscope.binary "+" %x, %y : f64
-  %1 = kaleidoscope.binary "*" %0, %y : f64
-  return %1 : f64
+func.func @test(%arg0: f64) -> f64 {
+  %cst = arith.constant 1.000000e+00 : f64
+  %0 = kaleidoscope.var "x" = %arg0 {argumentNumber = 1 : i64} : f64
+  %1 = kaleidoscope.read %0 : f64
+  %2 = kaleidoscope.var "y" = %1 {argumentNumber = 0 : i64} : f64
+  %3 = kaleidoscope.read %2 : f64
+  %4 = arith.addf %3, %cst : f64
+  kaleidoscope.assign %4 to %2 : f64
+  %5 = kaleidoscope.read %2 : f64
+  %6 = arith.mulf %4, %5 : f64
+  return %6 : f64
 }
 ```
 
-This IR records what the source program said: these values were produced by
-Kaleidoscope binary operators. It does not yet decide how those operators
-will be implemented. That decision moves out of AST generation and into an
-explicit dialect-conversion pass.
+The standard dialects still handle everything they already describe well.
+Only source variables use the Kaleidoscope dialect.
 
-This is the important idea behind progressive lowering. A compiler can keep
-an operation at the level where it is most useful, perform any analysis or
-transformation appropriate at that level, and only then replace it with more
-general operations.
+## Defining the Dialect
 
-## Defining the Dialect and Operation
-
-MLIR operations are commonly defined using the
+MLIR operations and types are commonly defined using the
 [Operation Definition Specification](https://mlir.llvm.org/docs/DefiningDialects/Operations/),
-or ODS. ODS uses TableGen records to describe an operation's name, operands,
-results, attributes, traits, assembly form, and generated C++ API.
-
-We begin by declaring our dialect and a base class for its operations:
+or ODS. We begin by declaring our dialect and a base class for its operations:
 
 ```tablegen
 def Kaleidoscope_Dialect : Dialect {
   let name = "kaleidoscope";
   let cppNamespace = "::mlir::kaleidoscope";
-  let summary = "Operations that preserve Kaleidoscope language semantics";
+  let summary = "Operations that preserve Kaleidoscope variable semantics";
+  let useDefaultTypePrinterParser = 1;
 }
 
 class Kaleidoscope_Op<string mnemonic, list<Trait> traits = []>
     : Op<Kaleidoscope_Dialect, mnemonic, traits>;
 ```
 
-The dialect name provides the `kaleidoscope.` prefix in textual MLIR. The C++
-namespace keeps the generated classes separate from other dialects.
-
-Our binary operation is also defined in TableGen:
+The dialect name provides the `kaleidoscope.` prefix in textual MLIR. We also
+define a small handle type representing a mutable source variable:
 
 ```tablegen
-def Kaleidoscope_BinaryOp : Kaleidoscope_Op<"binary", [
-    SameOperandsAndResultType
-  ]> {
-  let summary = "a built-in or user-defined Kaleidoscope binary operator";
-  let arguments = (ins F64:$lhs, F64:$rhs, StrAttr:$operatorName);
-  let results = (outs F64:$result);
-
-  let builders = [
-    OpBuilder<(ins "StringRef":$operatorName, "Value":$lhs,
-                   "Value":$rhs), [{
-      build($_builder, $_state, lhs.getType(), lhs, rhs,
-            $_builder.getStringAttr(operatorName));
-    }]>
-  ];
-
-  let assemblyFormat = "$operatorName $lhs `,` $rhs attr-dict `:` type($result)";
-  let hasVerifier = 1;
+def Kaleidoscope_VariableType
+    : TypeDef<Kaleidoscope_Dialect, "Variable"> {
+  let mnemonic = "var";
+  let summary = "a mutable Kaleidoscope variable";
+  let assemblyFormat = "";
 }
 ```
 
-`BinaryOp` has two `f64` operands, one `f64` result, and a string attribute
-containing the operator character. `SameOperandsAndResultType` records that
-its operands and result have the same type. We deliberately do not mark the
-operation `Pure`: a user-defined operator may call a function with side
-effects, even though Kaleidoscope's built-in arithmetic operators are pure.
+It is printed as `!kaleidoscope.var`. The type deliberately says only that the
+value is a variable. Its eventual stack representation is a lowering decision.
 
-The assembly format gives us the compact representation used above:
+## Variable Operations
 
-```mlir
-%0 = kaleidoscope.binary "+" %lhs, %rhs : f64
-```
+We need three operations. `kaleidoscope.var` declares and initializes a
+variable while preserving its source name. `argumentNumber` is zero for an
+ordinary local and one-based for a function parameter, matching DWARF's
+representation:
 
-We also request a custom verifier. Kaleidoscope operators contain exactly one
-character, and assignment is handled separately because it stores into a
-mutable variable:
-
-```cpp
-LogicalResult BinaryOp::verify() {
-  StringRef Operator = getOperatorName();
-  if (Operator.size() != 1)
-    return emitOpError("requires a one-character operator");
-  if (Operator == "=")
-    return emitOpError("does not represent the assignment operator");
-  return success();
+```tablegen
+def Kaleidoscope_DeclareOp : Kaleidoscope_Op<"var", []> {
+  let summary = "declare and initialize a mutable source variable";
+  let arguments = (ins F64:$initialValue, StrAttr:$name,
+                       I64Attr:$argumentNumber);
+  let results = (outs Kaleidoscope_VariableType:$variable);
+  let assemblyFormat = "$name `=` $initialValue attr-dict `:` type($initialValue)";
 }
 ```
 
-An operation may also provide folding behavior. Our folder handles the narrow
-case where both operands are floating-point constants:
+The other two operations read and update the variable:
 
-```cpp
-OpFoldResult BinaryOp::fold(FoldAdaptor Adaptor) {
-  auto LHS = dyn_cast_or_null<FloatAttr>(Adaptor.getLhs());
-  auto RHS = dyn_cast_or_null<FloatAttr>(Adaptor.getRhs());
-  if (!LHS || !RHS)
-    return {};
+```tablegen
+def Kaleidoscope_ReadOp : Kaleidoscope_Op<"read", []> {
+  let summary = "read a mutable source variable";
+  let arguments = (ins Kaleidoscope_VariableType:$variable);
+  let results = (outs F64:$value);
+  let assemblyFormat = "$variable attr-dict `:` type($value)";
+}
 
-  APFloat Result = LHS.getValue();
-  StringRef Operator = getOperatorName();
-  if (Operator == "+")
-    Result.add(RHS.getValue(), APFloat::rmNearestTiesToEven);
-  else if (Operator == "-")
-    Result.subtract(RHS.getValue(), APFloat::rmNearestTiesToEven);
-  else if (Operator == "*")
-    Result.multiply(RHS.getValue(), APFloat::rmNearestTiesToEven);
-  else
-    return {};
-
-  return FloatAttr::get(getResult().getType(), Result);
+def Kaleidoscope_AssignOp : Kaleidoscope_Op<"assign", []> {
+  let summary = "assign a new value to a mutable source variable";
+  let arguments = (ins Kaleidoscope_VariableType:$variable, F64:$value);
+  let assemblyFormat = "$value `to` $variable attr-dict `:` type($value)";
 }
 ```
 
-This is an example of behavior that can travel with an operation while it is
-part of the Kaleidoscope dialect. It is not something that requires a custom
-dialect: a compiler could also register patterns for `arith` operations. The
-reason for keeping `kaleidoscope.binary` is the separation between recording
-the source-language operation and deciding how to implement it.
+Notice that `kaleidoscope.read` is not marked `Pure`. Two reads of the same
+variable are not necessarily equal because an assignment may occur between
+them. Marking the operation pure would allow CSE to incorrectly reuse the
+earlier value.
 
-When a folder returns an attribute, MLIR asks the dialect to materialize that
-attribute as an operation. Our dialect delegates this job to
-`arith::ConstantOp`, since `arith` already has the constant operation we need:
-
-```cpp
-Operation *KaleidoscopeDialect::materializeConstant(
-    OpBuilder &Builder, Attribute Value, Type Type, Location Loc) {
-  return Builder.create<arith::ConstantOp>(
-      Loc, Type, cast<TypedAttr>(Value));
-}
-```
-
-For example, `2 + 3` is folded into an `arith.constant` containing `5.0`.
-
-TableGen generates most of the C++ operation class for us. The dialect's
-`initialize()` method registers the generated operation:
+TableGen generates the type and operation classes. The dialect registers them
+when it is initialized:
 
 ```cpp
 void KaleidoscopeDialect::initialize() {
+  addTypes<
+#define GET_TYPEDEF_LIST
+#include "KaleidoscopeTypes.cpp.inc"
+      >();
   addOperations<
 #define GET_OP_LIST
 #include "KaleidoscopeOps.cpp.inc"
@@ -185,105 +148,95 @@ void KaleidoscopeDialect::initialize() {
 }
 ```
 
-Finally, the generated files are added to the build using `mlir_tablegen`.
-The complete commands are available in the `CMakeLists.txt` for this chapter.
+The generated files are added to the build with `mlir_tablegen`; the complete
+commands appear in this chapter's `CMakeLists.txt`.
 
-## Generating Kaleidoscope IR
+## Generating Variable IR
 
-The language grammar and AST remain unchanged. Assignment still needs its
-special handling, and we still recursively generate the left- and right-hand
-sides. Once those values are available, every other binary expression now
-creates the same operation:
+Creating a source variable now creates one operation containing everything the
+lowering will need:
 
 ```cpp
-Value L = LHS->codegen();
-Value R = RHS->codegen();
-if (!L || !R)
-  return {};
-
-StringRef Operator(&Op, 1);
-if (Operator != "+" && Operator != "-" && Operator != "*" &&
-    Operator != "<" && !getFunction("binary" + Operator.str()))
-  return LogErrorV("Unknown binary operator");
-
-return TheBuilder->create<kaleidoscope::BinaryOp>(
-    getLocation(), Operator, L, R);
-```
-
-We retain the lookup for user-defined operators. Besides reporting an unknown
-operator promptly, JIT mode uses this lookup to reproduce its function
-declaration in the current module. The operation itself remains a
-`kaleidoscope.binary` until the lowering pass runs.
-
-For example, the language we added in Chapter 6 continues to work unchanged:
-
-```kaleidoscope
-def binary % 40 (x y)
-  x * y;
-
-def custom(x y)
-  x % y;
-```
-
-The second function initially contains:
-
-```mlir
-%0 = kaleidoscope.binary "%" %x, %y : f64
-```
-
-## Lowering the Kaleidoscope Dialect
-
-Now we need to describe how `kaleidoscope.binary` is implemented. An
-`OpConversionPattern` matches our operation and replaces it with legal
-operations from other dialects.
-
-The built-in arithmetic operators are straightforward:
-
-```cpp
-if (Operator == "+") {
-  Rewriter.replaceOpWithNewOp<arith::AddFOp>(Op, LHS, RHS);
-  return success();
-}
-if (Operator == "-") {
-  Rewriter.replaceOpWithNewOp<arith::SubFOp>(Op, LHS, RHS);
-  return success();
-}
-if (Operator == "*") {
-  Rewriter.replaceOpWithNewOp<arith::MulFOp>(Op, LHS, RHS);
-  return success();
+static Value CreateVariable(StringRef Name, Value InitialValue,
+                            int64_t ArgumentNumber = 0) {
+  return TheBuilder->create<kaleidoscope::DeclareOp>(
+      getLocation(), kaleidoscope::VariableType::get(TheContext.get()),
+      InitialValue, TheBuilder->getStringAttr(Name),
+      TheBuilder->getI64IntegerAttr(ArgumentNumber));
 }
 ```
 
-The `<` operator keeps Kaleidoscope's `0.0` or `1.0` result semantics:
+A variable expression becomes a read:
 
 ```cpp
-if (Operator == "<") {
-  Value Comparison = Rewriter.create<arith::CmpFOp>(
-      Loc, arith::CmpFPredicate::ULT, LHS, RHS);
-  Rewriter.replaceOpWithNewOp<arith::UIToFPOp>(
-      Op, Rewriter.getF64Type(), Comparison);
-  return success();
+return TheBuilder->create<kaleidoscope::ReadOp>(
+    getLocation(), TheBuilder->getF64Type(), It->second);
+```
+
+Assignment becomes an update while continuing to return the assigned value:
+
+```cpp
+TheBuilder->create<kaleidoscope::AssignOp>(getLocation(), It->second,
+                                           AssignedValue);
+return AssignedValue;
+```
+
+Function arguments use the same declaration operation, but include their
+one-based argument number:
+
+```cpp
+unsigned Index = 0;
+for (BlockArgument Argument : TheFunction.getArguments()) {
+  StringRef Name = P.getArgs()[Index];
+  Value Storage = CreateVariable(Name, Argument, Index + 1);
+  NamedValues[Name.str()] = Storage;
+  ++Index;
 }
 ```
 
-Anything else is a user-defined operator. Its implementation is the function
-whose name begins with `binary`, just as it was in previous chapters:
+Local variables and loop variables use argument number zero. We no longer need
+the separate `FunctionParameters` map from Chapter 9: each declaration carries
+its own name, location, and argument number.
+
+## Lowering Variables and Debug Information Together
+
+Our lowering pass converts `!kaleidoscope.var` to an LLVM pointer. A declaration
+becomes an `llvm.alloca` followed by the initializing `llvm.store`:
 
 ```cpp
-std::string FunctionName = "binary" + Operator.str();
-auto Module = Op->getParentOfType<ModuleOp>();
-auto Function = Module.lookupSymbol<func::FuncOp>(FunctionName);
-if (!Function)
-  return Rewriter.notifyMatchFailure(
-      Op, "unknown user-defined operator");
-
-Rewriter.replaceOpWithNewOp<func::CallOp>(
-    Op, Function, ValueRange{LHS, RHS});
-return success();
+Value One = LLVM::ConstantOp::create(
+    Rewriter, Loc, Rewriter.getI64Type(), Rewriter.getI64IntegerAttr(1));
+Value Address = LLVM::AllocaOp::create(Rewriter, Loc, PointerType,
+                                       DoubleType, One, 0);
+LLVM::StoreOp::create(Rewriter, Loc, Adaptor.getInitialValue(), Address);
 ```
 
-The pass declares the Kaleidoscope dialect illegal and supplies the pattern
-that knows how to eliminate it:
+At this exact point we still have the source variable operation and have just
+created its final stack address. There is nothing to rediscover. The same
+lowering creates its debug description and attaches it to that address:
+
+```cpp
+auto Variable = LLVM::DILocalVariableAttr::get(
+    Scope, Op.getName(), Scope.getFile(), Line,
+    Op.getArgumentNumber(), /*alignInBits=*/0, VariableType,
+    LLVM::DIFlags::Zero);
+LLVM::DbgDeclareOp::create(
+    Rewriter, Loc, Address, Variable,
+    LLVM::DIExpressionAttr::get(Rewriter.getContext()));
+```
+
+Reads and assignments lower directly to LLVM loads and stores:
+
+```cpp
+Rewriter.replaceOpWithNewOp<LLVM::LoadOp>(
+    Op, Rewriter.getF64Type(), Adaptor.getVariable());
+
+Rewriter.replaceOpWithNewOp<LLVM::StoreOp>(
+    Op, Adaptor.getValue(), Adaptor.getVariable());
+```
+
+The conversion target declares our dialect illegal, ensuring that lowering
+cannot silently finish while a Kaleidoscope variable operation remains:
 
 ```cpp
 ConversionTarget Target(Context);
@@ -291,83 +244,142 @@ Target.addIllegalDialect<kaleidoscope::KaleidoscopeDialect>();
 Target.markUnknownOpDynamicallyLegal([](Operation *) { return true; });
 
 RewritePatternSet Patterns(&Context);
-Patterns.add<BinaryOpLowering>(&Context);
-if (failed(applyPartialConversion(
-        getOperation(), Target, std::move(Patterns))))
+Patterns.add<DeclareOpLowering, ReadOpLowering, AssignOpLowering>(
+    Converter, &Context);
+if (failed(applyPartialConversion(getOperation(), Target,
+                                  std::move(Patterns))))
   signalPassFailure();
 ```
 
-Marking the dialect illegal is useful: lowering cannot silently succeed while
-a `kaleidoscope.binary` operation remains in the module.
+## Connecting the Pass Pipeline
 
-## Connecting the Lowering Pipeline
-
-The new pass runs first in `lowerToLLVM()`:
+We first lower the standard high-level dialects to the LLVM dialect. Our
+Chapter 9 debug pass then creates the compile unit and function scopes:
 
 ```cpp
-PassManager LoweringPM(TheContext.get());
-LoweringPM.addPass(std::make_unique<LowerKaleidoscopePass>());
-LoweringPM.addPass(createSCFToControlFlowPass());
-LoweringPM.addPass(createConvertFuncToLLVMPass());
-LoweringPM.addPass(createArithToLLVMConversionPass());
-LoweringPM.addPass(createFinalizeMemRefToLLVMConversionPass());
-LoweringPM.addPass(createConvertControlFlowToLLVMPass());
+PassManager DebugPM(TheContext.get());
+DebugPM.addPass(createKaleidoscopeDebugInfoPass(
+    InputFilename.getValue(), OptLevel));
 ```
 
-After the first pass, the module contains only the standard dialects already
-handled by the rest of our pipeline. No changes are needed in the LLVM IR
-translation, JIT, object-file emitter, or debug information support.
+With the function scopes available, our variable pass can create the stack
+storage and variable debug declarations together. MLIR's existing pass then
+fills in the remaining scopes on the lowered operations:
 
-Running our earlier example shows the custom operation before lowering:
+```cpp
+DebugPM.addPass(std::make_unique<LowerKaleidoscopeVariablesPass>());
 
-```mlir
-%0 = kaleidoscope.binary "+" %x, %y : f64
-%1 = kaleidoscope.binary "*" %0, %y : f64
+LLVM::DIScopeForLLVMFuncOpPassOptions DebugOptions;
+DebugOptions.emissionKind = LLVM::DIEmissionKind::Full;
+DebugPM.addPass(
+    LLVM::createDIScopeForLLVMFuncOpPass(std::move(DebugOptions)));
 ```
 
-The lowered LLVM IR contains the expected instructions:
+The resulting LLVM IR contains ordinary storage plus the debug declaration:
 
 ```llvm
-%sum = fadd double %x, %y
-%result = fmul double %sum, %y
+%x = alloca double, i64 1, align 8
+store double %arg0, ptr %x, align 8
+#dbg_declare(ptr %x, !variable, !DIExpression(), !location)
 ```
 
-The same source can still be executed by the JIT:
+After this point the normal LLVM translation, JIT, object emitter, and DWARF
+generation continue unchanged.
+
+## Trying It
+
+The source example still executes normally:
 
 ```text
-ready> arithmetic(2, 3);
-Evaluated to 15.000000
+ready> def test(x) var y = x in (y = y + 1) * y;
+Read function definition:
+ready> test(4);
+Evaluated to 25.000000
 ```
 
-and the alternative compilation mode still emits an object file:
+Using `--dump-mlir` shows the named variable operations before lowering:
 
-```bash
-./build/toy --emit-object program.ks
+<!-- code-merge:start -->
+```text
+$ ./build/toy --dump-mlir
+ready> def test(x) var y = x in (y = y + 1) * y;
+Read function definition:
 ```
+```mlir
+func.func @test(%arg0: f64) -> f64 {
+  %cst = arith.constant 1.000000e+00 : f64
+  %0 = kaleidoscope.var "x" = %arg0 {argumentNumber = 1 : i64} : f64
+  %1 = kaleidoscope.read %0 : f64
+  %2 = kaleidoscope.var "y" = %1 {argumentNumber = 0 : i64} : f64
+  %3 = kaleidoscope.read %2 : f64
+  %4 = arith.addf %3, %cst : f64
+  kaleidoscope.assign %4 to %2 : f64
+  %5 = kaleidoscope.read %2 : f64
+  %6 = arith.mulf %4, %5 : f64
+  return %6 : f64
+}
+```
+<!-- code-merge:end -->
+
+With `--dump-llvm-ir`, the variable operations have become stack allocations,
+loads, and stores. Each allocation also has the debug declaration generated by
+our lowering pass:
+
+<!-- code-merge:start -->
+```text
+$ ./build/toy --dump-llvm-ir
+ready> def test(x) var y = x in (y = y + 1) * y;
+```
+```llvm
+define double @test(double %0) !dbg !3 {
+  %2 = alloca double, i64 1, align 8, !dbg !6
+  store double %0, ptr %2, align 8, !dbg !6
+    #dbg_declare(ptr %2, !7, !DIExpression(), !6)
+  %3 = load double, ptr %2, align 8, !dbg !9
+  %4 = alloca double, i64 1, align 8, !dbg !10
+  store double %3, ptr %4, align 8, !dbg !10
+    #dbg_declare(ptr %4, !11, !DIExpression(), !10)
+  %5 = load double, ptr %4, align 8, !dbg !12
+  %6 = fadd double %5, 1.000000e+00, !dbg !13
+  store double %6, ptr %4, align 8, !dbg !14
+  %7 = load double, ptr %4, align 8, !dbg !15
+  %8 = fmul double %6, %7, !dbg !16
+  ret double %8, !dbg !6
+}
+
+!7 = !DILocalVariable(name: "x", arg: 1, scope: !3, file: !1, line: 1, type: !8)
+!11 = !DILocalVariable(name: "y", scope: !3, file: !1, line: 1, type: !8)
+```
+<!-- code-merge:end -->
+
+The first declaration describes parameter `x`; the second describes local
+variable `y`. The details omitted between the function and these metadata
+records are the compile-unit, function, type, and source-location metadata
+introduced in Chapter 9.
 
 ## Testing the Dialect
 
-Dialect conversion is a particularly good place for small regression tests.
-This chapter includes a lit test that checks the initial custom operations and
-then executes both built-in and user-defined operators through the JIT:
+Dialect conversion is a particularly good place for a small regression test.
+This chapter includes a lit test that checks all three variable operations and
+then executes the result:
 
 ```bash
 cmake --build build --target check-chapter-10
 ```
 
-The test checks that built-in expressions produce
-`kaleidoscope.binary`, that a user-defined `%` operator is represented by the
-same operation, and that both paths evaluate to the expected results.
-
 ## Full Code Listing
 
 The complete implementation is split across:
 
-- `toy.cpp`, containing the compiler and lowering pass;
-- `KaleidoscopeOps.td`, containing the ODS definitions;
+- `toy.cpp`, containing the compiler and variable-lowering pass;
+- `KaleidoscopeOps.td`, containing the variable type and operation definitions;
 - `KaleidoscopeDialect.h` and `KaleidoscopeDialect.cpp`, connecting the
-generated operation classes to the compiler; and
+  generated classes to the compiler;
+- `KaleidoscopeDebugInfo.h` and `KaleidoscopeDebugInfo.cpp`, creating the
+  compile-unit and function scopes; and
 - `CMakeLists.txt`, running TableGen and building the executable.
+
+### Build Configuration
 
 ```cmake(../code/chapter-10/CMakeLists.txt)
 ```
@@ -378,22 +390,48 @@ Use the chapter's build script as before:
 ./build.sh
 ```
 
+### Compiler
+
+```cpp(../code/chapter-10/toy.cpp)
+```
+
+### Dialect Definitions
+
+```tablegen(../code/chapter-10/KaleidoscopeOps.td)
+```
+
+### Dialect Declaration
+
+```cpp(../code/chapter-10/KaleidoscopeDialect.h)
+```
+
+### Dialect Implementation
+
+```cpp(../code/chapter-10/KaleidoscopeDialect.cpp)
+```
+
+### Debug-Scope Pass Declaration
+
+```cpp(../code/chapter-10/KaleidoscopeDebugInfo.h)
+```
+
+### Debug-Scope Pass Implementation
+
+```cpp(../code/chapter-10/KaleidoscopeDebugInfo.cpp)
+```
+
 ## Closing Thoughts
 
-We have not added any new Kaleidoscope syntax in this chapter. Instead, we
-changed the level of abstraction used by the compiler. The AST now records a
-source-language operation in a source-language dialect, and a separate pass
-decides how that operation is implemented.
+Our custom dialect is deliberately small. We introduced it because a source
+variable knows more than an anonymous allocation: it has a name, a source
+location, and perhaps an argument number. Preserving that information until
+lowering lets us generate storage and debug information together instead of
+reconstructing their relationship afterward.
 
-Our custom dialect is deliberately small, but it demonstrates the same
-architecture used by much larger MLIR-based compilers: define operations that
-preserve useful language or domain semantics, transform them while that
-information is available, and progressively lower them into more general
-dialects.
+This is the central reason to create a dialect. It lets a compiler retain the
+concepts that matter to its source language until it is ready to express them
+in more general operations. A future chapter could take the next step and
+represent the complete Kaleidoscope AST as a dialect; the MLIR Toy tutorial
+shows what that larger design looks like.
 
-The [MLIR Toy tutorial](https://mlir.llvm.org/docs/Tutorials/Toy/) takes this
-idea further. Where Kaleidoscope preserves operator semantics, Toy preserves
-tensor operations and shape information so that it can perform higher-level
-analysis and transformation before lowering. With the custom-dialect workflow
-from this chapter in place, you now have the background needed to continue
-  there after finishing our [conclusion](chapter-11.md).
+[Next: Conclusion and other useful LLVM tidbits](chapter-11.md)

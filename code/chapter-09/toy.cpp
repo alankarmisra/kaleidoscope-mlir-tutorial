@@ -1,4 +1,5 @@
 #include "../include/KaleidoscopeJIT.h"
+#include "KaleidoscopeDebugInfo.h"
 #include "mlir/Conversion/ArithToLLVM/ArithToLLVM.h"
 #include "mlir/Conversion/ControlFlowToLLVM/ControlFlowToLLVM.h"
 #include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"
@@ -23,7 +24,6 @@
 #include "mlir/Target/LLVMIR/Export.h"
 #include "mlir/Transforms/Passes.h"
 #include "llvm/ADT/SmallString.h"
-#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/LegacyPassManager.h"
 #include "llvm/IR/Module.h"
@@ -833,8 +833,8 @@ static func::FuncOp getCurrentFunction() {
   return Parent->getParentOfType<func::FuncOp>();
 }
 
-/// CreateEntryBlockAlloca - Create mutable storage in the function entry block.
-static Value CreateEntryBlockAlloca() {
+/// CreateEntryBlockStorage - Create mutable storage in the function entry block.
+static Value CreateEntryBlockStorage() {
   func::FuncOp Function = getCurrentFunction();
   OpBuilder::InsertionGuard Guard(*TheBuilder);
   TheBuilder->setInsertionPointToStart(&Function.front());
@@ -995,7 +995,7 @@ Value ForExprAST::codegen() {
   if (!StartVal)
     return {};
 
-  Value Variable = CreateEntryBlockAlloca();
+  Value Variable = CreateEntryBlockStorage();
   TheBuilder->create<memref::StoreOp>(getLocation(), StartVal, Variable,
                                       ValueRange{});
 
@@ -1088,7 +1088,7 @@ Value VarExprAST::codegen() {
       return {};
     }
 
-    Value Storage = CreateEntryBlockAlloca();
+    Value Storage = CreateEntryBlockStorage();
     TheBuilder->create<memref::StoreOp>(getLocation(), InitialValue, Storage,
                                         ValueRange{});
 
@@ -1148,7 +1148,7 @@ func::FuncOp FunctionAST::codegen() {
   NamedValues.clear();
   unsigned Index = 0;
   for (BlockArgument Argument : TheFunction.getArguments()) {
-    Value Storage = CreateEntryBlockAlloca();
+    Value Storage = CreateEntryBlockStorage();
     TheBuilder->create<memref::StoreOp>(getLocation(), Argument, Storage,
                                         ValueRange{});
     NamedValues[P.getArgs()[Index++]] = Storage;
@@ -1213,144 +1213,13 @@ struct LoweredModule {
   std::unique_ptr<llvm::Module> Module;
 };
 
-static Value findUnderlyingAlloca(Value V) {
-  Operation *DefiningOp = V.getDefiningOp();
-  if (!DefiningOp)
-    return {};
-  if (isa<LLVM::AllocaOp>(DefiningOp))
-    return V;
-  for (Value Operand : DefiningOp->getOperands())
-    if (Value Alloca = findUnderlyingAlloca(Operand))
-      return Alloca;
-  return {};
-}
-
-static void addDebugInfoScopes(ModuleOp Module) {
-  MLIRContext *Context = Module.getContext();
-  llvm::StringRef InputPath = InputFilename.getValue();
-  auto File = InputPath.empty()
-                  ? LLVM::DIFileAttr::get(Context, "<stdin>", "")
-                  : LLVM::DIFileAttr::get(
-                        Context, llvm::sys::path::filename(InputPath),
-                        llvm::sys::path::parent_path(InputPath));
-  auto CompileUnit = LLVM::DICompileUnitAttr::get(
-      DistinctAttr::create(UnitAttr::get(Context)), llvm::dwarf::DW_LANG_C,
-      File, StringAttr::get(Context, "Kaleidoscope"),
-      /*isOptimized=*/OptLevel != '0', LLVM::DIEmissionKind::Full);
-  Module->setLoc(FusedLoc::get(Context, {Module.getLoc()}, CompileUnit));
-
-  for (LLVM::LLVMFuncOp Function : Module.getOps<LLVM::LLVMFuncOp>()) {
-    Location OriginalLoc = Function.getLoc();
-    LLVM::DIFileAttr FunctionFile = File;
-    int64_t Line = 1;
-    if (auto FileLoc = OriginalLoc->findInstanceOf<FileLineColLoc>()) {
-      llvm::StringRef FunctionPath = FileLoc.getFilename().getValue();
-      FunctionFile = LLVM::DIFileAttr::get(
-          Context, llvm::sys::path::filename(FunctionPath),
-          llvm::sys::path::parent_path(FunctionPath));
-      Line = FileLoc.getLine();
-    }
-
-    DistinctAttr Id;
-    LLVM::DICompileUnitAttr FunctionCompileUnit = CompileUnit;
-    auto Flags = static_cast<LLVM::DISubprogramFlags>(0);
-    if (OptLevel != '0')
-      Flags = Flags | LLVM::DISubprogramFlags::Optimized;
-    if (Function.isExternal()) {
-      FunctionCompileUnit = {};
-    } else {
-      Id = DistinctAttr::create(UnitAttr::get(Context));
-      Flags = Flags | LLVM::DISubprogramFlags::Definition;
-    }
-
-    auto FunctionType = LLVM::DISubroutineTypeAttr::get(
-        Context, llvm::dwarf::DW_CC_normal, {});
-    auto Name = Function.getNameAttr();
-    auto Scope = LLVM::DISubprogramAttr::get(
-        Context, Id, FunctionCompileUnit, FunctionFile, Name, Name,
-        FunctionFile, Line, Line, Flags, FunctionType,
-        /*retainedNodes=*/{}, /*annotations=*/{});
-    Function->setLoc(FusedLoc::get(Context, {OriginalLoc}, Scope));
-  }
-}
-
-static void addParameterDebugInfo(ModuleOp Module) {
-  // Get the context used to create LLVM dialect debug attributes.
-  MLIRContext *Context = Module.getContext();
-  // Describe every Kaleidoscope parameter as a 64-bit DWARF double.
-  auto DoubleType = LLVM::DIBasicTypeAttr::get(
-      Context, llvm::dwarf::DW_TAG_base_type, "double", 64,
-      llvm::dwarf::DW_ATE_float);
-  // Use each variable's address directly, without a DWARF transformation.
-  auto EmptyExpression = LLVM::DIExpressionAttr::get(Context);
-
-  // Add parameter information to every lowered LLVM function in the module.
-  for (LLVM::LLVMFuncOp Function : Module.getOps<LLVM::LLVMFuncOp>()) {
-    // Recover the source parameter names saved before lowering.
-    auto Names = FunctionParameters.find(Function.getName().str());
-    // Declarations have no body, and some functions may have no saved names.
-    if (Function.isExternal() || Names == FunctionParameters.end())
-      continue;
-
-    // Find the function's debug scope, attached before the debug-scope pass.
-    auto ScopeLoc = Function.getLoc()
-                        ->findInstanceOf<
-                            FusedLocWith<LLVM::DISubprogramAttr>>();
-    // A variable cannot be declared without a containing function scope.
-    if (!ScopeLoc)
-      continue;
-
-    // Extract the function description attached to its fused location.
-    LLVM::DISubprogramAttr Scope = ScopeLoc.getMetadata();
-
-    // Lowered function parameters are arguments of the entry block.
-    Block &EntryBlock = Function.getBody().front();
-    // Pair each zero-based block argument with its saved source name.
-    for (auto [ArgumentNumber, Name] : llvm::enumerate(Names->second)) {
-      // Stop if the saved parameter list is longer than the lowered list.
-      if (ArgumentNumber >= EntryBlock.getNumArguments())
-        break;
-
-      // Get the SSA value holding the incoming parameter.
-      BlockArgument Argument = EntryBlock.getArgument(ArgumentNumber);
-      // Find the store that copies this value into mutable stack storage.
-      LLVM::StoreOp ArgumentStore;
-      for (LLVM::StoreOp Store : EntryBlock.getOps<LLVM::StoreOp>()) {
-        // The matching store uses the block argument as its stored value.
-        if (Store.getValue() == Argument) {
-          ArgumentStore = Store;
-          break;
-        }
-      }
-      // A parameter without stack storage cannot use dbg.declare here.
-      if (!ArgumentStore)
-        continue;
-
-      // Describe the parameter's name, scope, position, and type to DWARF.
-      auto Variable = LLVM::DILocalVariableAttr::get(
-          Scope, Name, Scope.getFile(), Scope.getLine(), ArgumentNumber + 1,
-          /*alignInBits=*/0, DoubleType, LLVM::DIFlags::Zero);
-      // Recover the actual allocation hidden by the lowered memref descriptor.
-      Value VariableAddress = findUnderlyingAlloca(ArgumentStore.getAddr());
-      // Fall back to the store address if no underlying alloca was found.
-      if (!VariableAddress)
-        VariableAddress = ArgumentStore.getAddr();
-      // Insert the debug declaration immediately after the initial store.
-      OpBuilder Builder(ArgumentStore);
-      Builder.setInsertionPointAfter(ArgumentStore);
-      // Associate the source parameter description with its stack address.
-      Builder.create<LLVM::DbgDeclareOp>(ArgumentStore.getLoc(),
-                                         VariableAddress, Variable,
-                                         EmptyExpression);
-    }
-  }
-}
-
 static llvm::Expected<LoweredModule>
 lowerToLLVM(const llvm::DataLayout &DataLayout) {
   // Lower the high-level MLIR operations to the LLVM dialect.
   PassManager LoweringPM(TheContext.get());
   LoweringPM.addPass(createSCFToControlFlowPass());
+  if (OptLevel != '0')
+    LoweringPM.addPass(createMem2Reg());
   LoweringPM.addPass(createConvertFuncToLLVMPass());
   LoweringPM.addPass(createArithToLLVMConversionPass());
   LoweringPM.addPass(createFinalizeMemRefToLLVMConversionPass());
@@ -1363,22 +1232,20 @@ lowerToLLVM(const llvm::DataLayout &DataLayout) {
         "could not lower module to the LLVM dialect",
         llvm::inconvertibleErrorCode());
 
-  // Create optimization-aware compile-unit and function scopes before asking
-  // MLIR to add the remaining scope information to operation locations.
-  addDebugInfoScopes(*TheModule);
+  // Add our language-specific compile-unit, function, and parameter debug info.
+  PassManager DebugPM(TheContext.get());
+  DebugPM.addPass(createKaleidoscopeDebugInfoPass(
+      InputFilename.getValue(), OptLevel, FunctionParameters));
+
+  // Fill in the remaining debug scopes on the lowered LLVM operations.
   LLVM::DIScopeForLLVMFuncOpPassOptions DebugOptions;
   DebugOptions.emissionKind = LLVM::DIEmissionKind::Full;
-  PassManager DebugPM(TheContext.get());
   DebugPM.addPass(
       LLVM::createDIScopeForLLVMFuncOpPass(std::move(DebugOptions)));
   if (failed(DebugPM.run(*TheModule)))
     return llvm::make_error<llvm::StringError>(
         "could not add LLVM debug scopes",
         llvm::inconvertibleErrorCode());
-
-  // Describe source parameters in the LLVM dialect while their lowered stack
-  // storage and MLIR debug scopes are still available.
-  addParameterDebugInfo(*TheModule);
 
   // Register the translations from MLIR's LLVM dialect to LLVM IR.
   registerBuiltinDialectTranslation(*TheContext);

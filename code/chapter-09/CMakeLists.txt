@@ -8,7 +8,10 @@ set(CMAKE_CXX_EXTENSIONS NO)
 
 find_package(MLIR REQUIRED CONFIG)
 
-add_executable(toy toy.cpp)
+add_executable(toy
+  toy.cpp
+  KaleidoscopeDebugInfo.cpp
+)
 
 # Make symbols in the executable available to the JIT for runtime lookup.
 set_target_properties(toy PROPERTIES ENABLE_EXPORTS ON)

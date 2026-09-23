@@ -1,3 +1,5 @@
+# CMakeLists.txt
+
 cmake_minimum_required(VERSION 3.20)
 
 project(kaleidoscope-chapter-10 LANGUAGES C CXX)
@@ -11,6 +13,9 @@ find_package(MLIR REQUIRED CONFIG)
 get_filename_component(KALEIDOSCOPE_LLVM_BUILD_DIR
   "${MLIR_DIR}/../../.." ABSOLUTE)
 set(KALEIDOSCOPE_LLVM_TOOLS_DIR "${KALEIDOSCOPE_LLVM_BUILD_DIR}/bin")
+find_program(KALEIDOSCOPE_LLVM_LIT llvm-lit
+  HINTS "${KALEIDOSCOPE_LLVM_TOOLS_DIR}"
+  REQUIRED)
 
 list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
 include(TableGen)
@@ -22,21 +27,31 @@ mlir_tablegen(KaleidoscopeDialect.h.inc -gen-dialect-decls
   -dialect=kaleidoscope)
 mlir_tablegen(KaleidoscopeDialect.cpp.inc -gen-dialect-defs
   -dialect=kaleidoscope)
+mlir_tablegen(KaleidoscopeTypes.h.inc -gen-typedef-decls
+  -typedefs-dialect=kaleidoscope)
+mlir_tablegen(KaleidoscopeTypes.cpp.inc -gen-typedef-defs
+  -typedefs-dialect=kaleidoscope)
 mlir_tablegen(KaleidoscopeOps.h.inc -gen-op-decls)
 mlir_tablegen(KaleidoscopeOps.cpp.inc -gen-op-defs)
 add_custom_target(KaleidoscopeOpsIncGen DEPENDS
   KaleidoscopeDialect.h.inc
   KaleidoscopeDialect.cpp.inc
+  KaleidoscopeTypes.h.inc
+  KaleidoscopeTypes.cpp.inc
   KaleidoscopeOps.h.inc
   KaleidoscopeOps.cpp.inc
 )
 
-add_executable(toy toy.cpp KaleidoscopeDialect.cpp)
+add_executable(toy
+  toy.cpp
+  KaleidoscopeDialect.cpp
+  KaleidoscopeDebugInfo.cpp
+)
 add_dependencies(toy KaleidoscopeOpsIncGen)
 
 configure_file(test/lit.site.cfg.py.in test/lit.site.cfg.py @ONLY)
 add_custom_target(check-chapter-10
-  COMMAND ${KALEIDOSCOPE_LLVM_TOOLS_DIR}/llvm-lit -sv
+  COMMAND ${KALEIDOSCOPE_LLVM_LIT} -sv
           ${CMAKE_CURRENT_BINARY_DIR}/test
   DEPENDS toy
   USES_TERMINAL

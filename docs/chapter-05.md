@@ -173,8 +173,12 @@ extern bar();
 def baz(x) if x then foo() else bar();
 ```
 
-The MLIR you’ll (soon) get from Kaleidoscope looks like this:
+Running the example produces the following MLIR, annotated for clarity:
 
+<!-- code-merge:start -->
+```text
+$ build/toy --dump-mlir --dump-llvm-ir
+```
 ```mlir
 ready> extern foo();
 Read extern:
@@ -184,22 +188,128 @@ Read extern:
 func.func private @bar() -> f64
 ready> def baz(x) if x then foo() else bar();
 Read function definition:
+
+// SCF hierarchy
+// function region
+// └── block
+//     └── scf.if
+//         ├── then region → block → scf.yield
+//         └── else region → block → scf.yield
+
+// func.func is an operation that owns the function body region.
 func.func @baz(%arg0: f64) -> f64 {
+  // The function body region contains one implicit entry block.
+  // └── entry block
+
   %cst = arith.constant 0.000000e+00 : f64
   %0 = arith.cmpf one, %arg0, %cst : f64
+
+  // scf.if is an operation in the function's entry block.
+  // It owns a then region and an else region.
+  // The net construction is not very different from 
+  // a regular if construction.
   %1 = scf.if %0 -> (f64) {
+    // Then region
+    // └── implicit entry block
     %2 = func.call @foo() : () -> f64
+    // return value and save in %1 (%1 = ...)
     scf.yield %2 : f64
   } else {
+    // Else region
+    // └── implicit entry block
     %2 = func.call @bar() : () -> f64
+    // return value and save in %1 (%1 = ...)
     scf.yield %2 : f64
   }
+  
+  // return the value produced by either `then` or `else`
   return %1 : f64
 }
 ```
+<!-- code-merge:end -->
 
-So far, we've been looking only at the MLIR dump for our code generation. We will now descend into the LLVM IR to understand a few useful concepts such as the `Phi node`. It's not something you'll deal with directly right now, but it is something that, as a compiler engineer, you need to be aware of. SO here's an LLVM IR dum of our code. 
+The MLIR is expressed using the [SCF dialect](https://mlir.llvm.org/docs/Dialects/SCFDialect/),
+which represents *structured control flow*. An `scf.if` contains nested `then`
+and `else` regions. Each region uses `scf.yield` to return its value, and the selected
+value becomes the result `%1` of the complete `scf.if` operation.
 
+### Lowering SCF to CF
+
+Structured control flow is convenient for our frontend to generate and for
+high-level transformations to analyze. Before reaching LLVM, however, it must
+be lowered into an explicit control-flow graph. A control-flow graph has no if or else; it uses jumps between blocks to express the same thing. MLIR represents that form with
+the [CF dialect](https://mlir.llvm.org/docs/Dialects/ControlFlowDialect/).
+
+Unlike SCF, the CF dialect has no `if` operation with nested regions.
+`cf.cond_br` chooses between named basic blocks, and `cf.br` transfers control
+from one block to another. When we run `--convert-scf-to-cf`, the `baz`
+function becomes:
+
+```mlir
+// CF hierarchy
+// function region
+// ├── entry block
+// ├── then block
+// ├── else block
+// ├── merge block(%3: f64)
+// └── return block
+
+func.func @baz(%arg0: f64) -> f64 {
+  // Entry block: test the condition and select a successor.
+  %cst = arith.constant 0.000000e+00 : f64
+  %0 = arith.cmpf one, %arg0, %cst : f64
+  cf.cond_br %0, ^bb1, ^bb2
+
+// Then block: pass the value returned by foo to the merge block.
+^bb1:
+  %1 = call @foo() : () -> f64
+  cf.br ^bb3(%1 : f64)
+
+// Else block: pass the value returned by bar to the merge block.
+^bb2:
+  %2 = call @bar() : () -> f64
+  cf.br ^bb3(%2 : f64)
+
+// Merge block: receive the value selected by the predecessor as %3.
+^bb3(%3: f64):
+  cf.br ^bb4
+
+// Return block.
+^bb4:
+  return %3 : f64
+}
+```
+
+The two branches pass different values to the same destination block:
+
+```mlir
+cf.br ^bb3(%1 : f64)
+cf.br ^bb3(%2 : f64)
+```
+
+The destination receives whichever value was passed as its block argument
+`%3`:
+
+```mlir
+^bb3(%3: f64):
+```
+
+A block argument is a value listed in a block's label. Every branch to that
+block supplies the corresponding value, much like arguments supplied in a
+function call. Here, both branches target `^bb3`, so each must supply the `f64`
+received as `%3`.
+
+The block argument therefore contains the value returned by `foo()` when
+control arrives from `^bb1`, and the value returned by `bar()` when control
+arrives from `^bb2`. This is how the CF dialect represents an SSA value that
+can come from more than one predecessor.
+
+### Lowering CF to LLVM IR
+
+The `--dump-llvm-ir` option used above prints the result after the remaining
+MLIR operations have been lowered and the LLVM dialect has been translated to
+LLVM IR. The output is shown below with descriptive names and comments added
+for clarity:
 
 ```llvm
 declare double @foo()
@@ -214,15 +324,15 @@ entry:
   ;; Branch to %then if the condition is true, or %else if it is false.
 
 then:
-  %thenvalue = call double @foo()
+  %calltmp = call double @foo()
   br label %ifcont
 
 else:
-  %elsevalue = call double @bar()
+  %calltmp1 = call double @bar()
   br label %ifcont
 
 ifcont:
-  %iftmp = phi double [ %elsevalue, %else ], [ %thenvalue, %then ]
+  %iftmp = phi double [ %calltmp1, %else ], [ %calltmp, %then ]
   br label %return
 
 return:
@@ -233,50 +343,51 @@ return:
 !!!note
     The LLVM IR dump normally uses numbered names such as `%0`, `%1`, and `%2`. In the listing above, we've replaced those numbers with descriptive names to make the control flow easier to follow. We've also added comments that won't appear in the actual output.
 
-The generated code is fairly simple: the entry block evaluates the conditional expression ("x" in our case here) and compares the result to 0.0 with the "`fcmp one`" instruction ('one' is "Ordered and Not Equal"). Based on the result of this expression, the code jumps to either the "then" or "else" blocks, which contain the expressions for the true/false cases. 
+The generated code is fairly simple: the entry block evaluates the conditional expression ("x" in our case here) and compares the result to 0.0 with the "`fcmp one`" instruction ('one' is "Ordered and Not Equal"). Based on the result of this expression, the code jumps to either the "then" or "else" blocks, which contain the expressions for the true/false cases.
 
 Once the then/else blocks are finished executing, they both branch back to the 'ifcont' block to execute the code that happens after the if/then/else. In this case the only thing left to do is to return to the caller of the function. The question then becomes: how does the code know which expression to return?
 
 The answer to this question involves an important SSA operation: the
-[Phi operation](http://en.wikipedia.org/wiki/Static_single_assignment_form).
+[PHI node](http://en.wikipedia.org/wiki/Static_single_assignment_form).
 If you're not familiar with SSA, [the wikipedia
 article](http://en.wikipedia.org/wiki/Static_single_assignment_form)
 is a good introduction and there are various other introductions to it
 available on your favorite search engine. The short version is that
-"execution" of the Phi operation requires "remembering" which block
-control came from. The Phi operation takes on the value corresponding to
+"execution" of the PHI node requires "remembering" which block
+control came from. The PHI node takes on the value corresponding to
 the input control block. In this case, if control comes in from the
-"then" block, it gets the value of "calltmp". If control comes from the
-"else" block, it gets the value of "calltmp1".
+"then" block, it gets the value of `%calltmp`. If control comes from the
+"else" block, it gets the value of `%calltmp1`.
+
+The CF block argument performs the same SSA merge as this LLVM PHI node. MLIR
+attaches each incoming value to the branch that enters the block; LLVM instead
+lists the incoming value and predecessor together in the PHI node:
+
+| MLIR CF | LLVM IR |
+| --- | --- |
+| `cf.br ^bb3(%1 : f64)` from `^bb1` | `[ %calltmp, %then ]` |
+| `cf.br ^bb3(%2 : f64)` from `^bb2` | `[ %calltmp1, %else ]` |
+| `^bb3(%3: f64)` receives the selected value | `%iftmp = phi double ...` produces the selected value |
+
+The complete progression is therefore:
+
+```text
+scf.if result
+    -> cf block argument
+    -> LLVM PHI node
+```
+
+For the rest of the tutorial, we can work with MLIR block arguments. Lowering
+will translate them into LLVM PHI nodes when LLVM IR is generated.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/t-llvm-gray.svg">
   <img src="images/t-llvm.svg" alt="LLVM control-flow graph">
 </picture>
 
-At this point, you are probably starting to think "Oh no! This means my
-simple and elegant front-end will have to start generating SSA form in
-order to use LLVM!". Fortunately, this is not the case, and we strongly
-advise *not* implementing an SSA construction algorithm in your
-front-end unless there is an amazingly good reason to do so. In
-practice, there are two sorts of values that float around in code
-written for your average imperative programming language that might need
-Phi nodes:
-
-1. Code that involves user variables: `x = 1; x = x + 1;`
-2. Values that are implicit in the structure of your AST, such as the
-   Phi node in this case.
-
-In [Chapter 7](chapter-07.md) of this tutorial ("mutable variables"),
-we'll talk about #1 in depth. For now, just believe me that you don't
-need SSA construction to handle this case. For #2, you have the choice
-of using the techniques that we will describe for #1, or you can insert
-Phi nodes directly, if convenient. Had we been using lower level LLVM instead of MLIR, it is really
-easy to generate the Phi node, and we would choose to do it directly.
-
-However, with MLIR, we have to do NONE of this. We use the [`scf`]() dialect and insert if/else operations and it does everything for us!
-
-Okay, enough of the motivation and overview, let's generate code!
+If we were generating LLVM IR directly, our frontend would need to construct
+these basic blocks and the PHI node. By starting with SCF, our frontend can
+describe the conditional directly and leave both lowering steps to MLIR.
 
 ### Code Generation for If/Then/Else
 
@@ -303,7 +414,7 @@ the expression for the condition, then compare that value to zero to get
 an `i1` truth value.
 
 With the condition emitted, we can create an
-[`scf.if`](https://mlir.llvm.org/docs/Dialects/SCFDialect/#scfif-scfifop)
+[scf.if](https://mlir.llvm.org/docs/Dialects/SCFDialect/#scfif-scfifop)
 operation. The `scf` dialect represents structured control flow, allowing
 us to describe the `if` expression directly instead of constructing its
 basic blocks ourselves.
@@ -327,7 +438,7 @@ The first callback passed to `scf::IfOp` builds the `then` region:
 
 We recursively generate the value of the `then` expression and finish
 the region with
-[`scf.yield`](https://mlir.llvm.org/docs/Dialects/SCFDialect/#scfyield-scfyieldop).
+[scf.yield](https://mlir.llvm.org/docs/Dialects/SCFDialect/#scfyield-scfyieldop).
 The yielded value becomes the result of the `scf.if` operation when its
 condition is true.
 
@@ -555,24 +666,66 @@ func.func @printstar(%arg0: f64) -> f64 {
 ```
 
 The loop is represented by an
-[`scf.while`](https://mlir.llvm.org/docs/Dialects/SCFDialect/#scfwhile-scfwhileop)
+[scf.while](https://mlir.llvm.org/docs/Dialects/SCFDialect/#scfwhile-scfwhileop)
 operation. Its loop-carried value, `%arg1`, is the current value of the
 induction variable. It begins with `%cst_1`, which is `1.0` in this
 example.
 
 The first region tests the end condition before each iteration. The
-[`scf.condition`](https://mlir.llvm.org/docs/Dialects/SCFDialect/#scfcondition-scfconditionop)
+[scf.condition](https://mlir.llvm.org/docs/Dialects/SCFDialect/#scfcondition-scfconditionop)
 operation determines whether the loop continues and forwards the current
 induction value to the `do` region. Consequently, a false initial
 condition prevents the body from running at all. The `do` region emits
 the body and step, then uses
-[`scf.yield`](https://mlir.llvm.org/docs/Dialects/SCFDialect/#scfyield-scfyieldop)
+[scf.yield](https://mlir.llvm.org/docs/Dialects/SCFDialect/#scfyield-scfyieldop)
 to carry the next induction value back to the condition.
 
-When this structured control flow is lowered, the loop-carried region
-argument becomes a PHI node. The automatically numbered names in the
-actual output have been replaced with descriptive names below for
-clarity:
+Lowering the structured loop to the `cf` dialect replaces its two regions with
+explicit condition, body, and exit blocks. The loop-carried value is passed
+between those blocks as a block argument:
+
+```mlir
+// CF hierarchy
+// function region
+// ├── entry block
+// ├── condition block(%0: f64)
+// ├── body block(%2: f64)
+// └── exit block
+
+func.func @printstar(%arg0: f64) -> f64 {
+  %cst = arith.constant 4.200000e+01 : f64
+  %cst_0 = arith.constant 0.000000e+00 : f64
+  %cst_1 = arith.constant 1.000000e+00 : f64
+
+  // Entry block: pass the initial value to the condition block.
+  cf.br ^bb1(%cst_1 : f64)
+
+// Condition block: %0 is the current induction value.
+^bb1(%0: f64):
+  %1 = arith.cmpf ult, %0, %arg0 : f64
+  cf.cond_br %1, ^bb2(%0 : f64), ^bb3
+
+// Body block: receive the current value, execute the body, and pass the next
+// value back to the condition block.
+^bb2(%2: f64):
+  %3 = call @putchard(%cst) : (f64) -> f64
+  %4 = arith.addf %2, %cst_1 : f64
+  cf.br ^bb1(%4 : f64)
+
+// Exit block.
+^bb3:
+  return %cst_0 : f64
+}
+```
+
+The first branch supplies the initial value `%cst_1` to the condition block.
+After each iteration, the body supplies `%4`, the next induction value, to the
+same block argument `%0`. If the condition remains true, `%0` is passed onward
+to the body as its block argument `%2`.
+
+Lowering these block arguments to LLVM IR produces PHI nodes. The automatically
+numbered names in the actual output have been replaced with descriptive names
+below for clarity:
 
 ```llvm
 declare double @putchard(double)
@@ -601,8 +754,9 @@ This loop contains the same basic blocks and PHI nodes that we saw in the
 lowered if/then/else expression. The PHI node selects `1.0` when control
 first enters the loop from `entry`, and `%nextvar` when control returns
 along the loop backedge. The condition is tested before branching to
-`body`. In the MLIR above, the `scf.while` region arguments express
-these relationships directly.
+`body`. The `scf.while` region arguments express these relationships in the
+structured form; after SCF-to-CF lowering, the block arguments express them in
+the control-flow graph.
 
 ### Code Generation for the 'for' Loop
 
@@ -698,9 +852,10 @@ was specified:
 ```
 
 The `scf.yield` operation carries `NextVar` back to the first region,
-where the condition is evaluated again. MLIR handles the blocks and
-their arguments, so we do not need to construct the loop's PHI nodes or
-backedge ourselves.
+where the condition is evaluated again. MLIR handles the blocks and their
+arguments, so we do not need to construct the loop's block arguments or
+backedge ourselves. Those block arguments become PHI nodes when we later lower
+to LLVM IR.
 
 After constructing the loop, we restore the source-level symbol that was
 shadowed, or remove the loop variable if no previous definition existed:
@@ -725,14 +880,9 @@ The generated SSA value remains scoped to the `scf.while` regions, while
 restoring `NamedValues` keeps the frontend's view of source-level scope
 in sync. Finally, code generation of the for loop always returns `0.0`.
 
-With this, we conclude the "adding control flow to Kaleidoscope" chapter
-of the tutorial. In this chapter we added two control flow constructs,
-and used them to motivate a couple of aspects of the LLVM IR that are
-important for front-end implementors to know. In the next chapter of our
-saga, we will get a bit crazier and add [user-defined
-operators](chapter-06.md) to our poor innocent language.
-
 ## Control Flow Graph Visualization Tools
+
+### MLIR
 
 To visualize the control flow graph, you can use MLIR's
 `--view-op-graph` option. The output above shows one REPL interaction at a
@@ -740,6 +890,7 @@ time, so it is not quite a standalone MLIR file. Save the complete module below
 as `t.mlir`:
 
 ```mlir
+// t.mlir
 module {
   func.func private @foo() -> f64
   func.func private @bar() -> f64
@@ -791,23 +942,81 @@ edges. The remaining commands remove the default node colors and render two
 graphs with transparent backgrounds: a black version for light mode and a gray
 version that remains visible in dark mode.
 
-On macOS, you can open the resulting graph with:
-
-```bash
-open t-mlir.svg
-```
+You can then open the `t-mlir.svg` or `t-mlir-gray.svg` file in a viewer of your choice.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/t-mlir-gray.svg">
   <img src="images/t-mlir.svg" alt="MLIR control-flow graph">
 </picture>
 
-To visualize the control flow graph for LLVM IR, you can use a nifty feature of the LLVM '[opt](https://llvm.org/cmds/opt.html)' tool. If you put this LLVM IR into "t.ll" and run "`llvm-as < t.ll | opt -passes=view-cfg`", [a window will pop up](https://llvm.org/docs/ProgrammersManual.html#viewing-graphs-while-debugging-code) and you'll see this graph:
+### LLVM IR
+
+LLVM's [opt](https://llvm.org/cmds/opt.html) tool can display the
+corresponding LLVM control-flow graph. Save the complete module below as
+`t.ll`:
+
+```llvm
+; t.ll
+declare double @foo()
+declare double @bar()
+
+define double @baz(double %x) {
+entry:
+  %ifcond = fcmp one double %x, 0.000000e+00
+  br i1 %ifcond, label %then, label %else
+
+then:
+  %calltmp = call double @foo()
+  br label %ifcont
+
+else:
+  %calltmp1 = call double @bar()
+  br label %ifcont
+
+ifcont:
+  %iftmp = phi double [ %calltmp1, %else ], [ %calltmp, %then ]
+  ret double %iftmp
+}
+```
+
+Then ask `opt` to write its control-flow graph as a DOT file. LLVM gives the
+nodes heat-map colors by default, so we remove those explicit colors before
+rendering neutral light- and dark-mode versions:
+
+```bash
+opt -passes=dot-cfg -disable-output t.ll
+
+perl -pe \
+  's/fillcolor="#[0-9a-fA-F]+",?\s*//g; s/color="#[0-9a-fA-F]+",?\s*//g; s/style=filled,?\s*//g' \
+  .baz.dot > t-llvm.dot
+
+dot -Tsvg -Gbgcolor=transparent \
+  -Gcolor=black -Gfontcolor=black \
+  -Ncolor=black -Nfontcolor=black \
+  -Ecolor=black -Efontcolor=black \
+  -o t-llvm.svg t-llvm.dot
+
+dot -Tsvg -Gbgcolor=transparent \
+  -Gcolor=gray -Gfontcolor=gray \
+  -Ncolor=gray -Nfontcolor=gray \
+  -Ecolor=gray -Efontcolor=gray \
+  -o t-llvm-gray.svg t-llvm.dot
+```
+
+The generated files show this graph:
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="images/t-llvm-gray.svg">
   <img src="images/t-llvm.svg" alt="LLVM control-flow graph">
 </picture>
+
+With this, we conclude the "adding control flow to Kaleidoscope" chapter
+of the tutorial. In this chapter we added two control flow constructs,
+and used them to motivate a couple of aspects of the LLVM IR that are
+important for front-end implementors to know. In the next chapter of our
+saga, we will get a bit crazier and add [user-defined
+operators](chapter-06.md) to our poor innocent language.
+
 
 ## Full Code Listing
 
