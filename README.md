@@ -57,19 +57,14 @@ There is barely any MLIR to worry about yet, which is probably for the best.
 ### [Chapter 2: The Parser and AST](docs/chapter-02.md)
 
 Again, this stays close to the original route: recursive descent parsing,
-operator precedence, and a small tree of expression classes. MLIR is waiting
-offstage. At this point we are mostly making sure we have a language worth
-compiling.
+operator precedence, and a small tree of expression classes. 
 
 ### [Chapter 3: Generating MLIR](docs/chapter-03.md)
 
-This is the first proper fork in the road. The original tutorial generates
-LLVM IR from the AST. We generate operations from the `arith` and `func`
-dialects instead. Functions contain regions, regions contain blocks, and the
-IR still looks pleasantly close to the source program.
+The original tutorial generates LLVM IR from the AST. We generate operations from the `arith` and `func`
+dialects instead. Functions contain regions, regions contain blocks, and the IR still looks pleasantly close to the source program.
 
-We also start using `--dump-mlir`, because being able to look at each function
-as it is created makes the rest of the tutorial much easier to follow.
+We also start using `--dump-mlir`, because being able to look at each function as it is created makes the rest of the tutorial much easier to follow.
 
 ### [Chapter 4: Optimization and the JIT](docs/chapter-04.md)
 
@@ -79,50 +74,35 @@ CSE happen before we lower through the LLVM dialect, translate to LLVM IR, and
 hand the result to ORC.
 
 This is also where `--dump-llvm-ir` appears. From here onward we can look at
-both sides of the bridge instead of pretending one representation is the whole
-compiler.
+both mlir and llvm ir.
 
 ### [Chapter 5: Control Flow](docs/chapter-05.md)
 
-The original chapter has to talk fairly directly about basic blocks and PHI
-nodes. We begin higher up with the `scf` dialect, where an `if` really is an
+We begin higher up with the `scf` dialect, where an `if` really is an
 `if` with regions and yielded values. Lowering turns that into the `cf`
 dialect, region results become block arguments, and those block arguments
 eventually become LLVM PHI nodes.
 
-This chapter is probably where the MLIR approach first becomes visible as more
-than a change of API.
-
 ### [Chapter 6: User-Defined Operators](docs/chapter-06.md)
 
-We drift back toward the original tutorial for a while. Kaleidoscope learns to
-define its own unary and binary operators, including precedence. The generated
-calls and arithmetic are still MLIR operations, but the interesting part of
-the chapter is mostly the language itself.
+Very similar to the original LLVM approach to defining unary and binary operators The generated
+calls and arithmetic are still MLIR operations.
 
 ### [Chapter 7: Mutable Variables](docs/chapter-07.md)
 
-Mutation brings the SSA question back. Rather than teaching the frontend to
-manufacture PHI nodes, we represent variables as memory, use loads and stores,
-and let the pass pipeline promote that memory back into SSA where it can.
-
-The story is recognizably the same as the LLVM tutorial, except that we can
-watch it move through structured MLIR, explicit control flow, block arguments,
-and finally LLVM IR.
+Mutation brings the SSA question back. Rather than teaching the frontend to manufacture PHI nodes, we represent variables as memory, use loads and stores, and let the pass pipeline promote that memory back into SSA where it can watcing the output move through structured MLIR, explicit control flow, block arguments, and finally LLVM IR.
 
 ### [Chapter 8: Object Files](docs/chapter-08.md)
 
-MLIR has taken us as far as the LLVM dialect, and LLVM now takes over the
-target-specific work. We translate to LLVM IR, choose a target, emit an object
+Dropping down to LLVM now takes for the target-specific work. We translate to LLVM IR, choose a target, emit an object
 file, and link a small native program. The chapter also supports selecting a
 target triple and choosing the output filename, mostly because it is useful to
 see where target independence actually ends.
 
 ### [Chapter 9: Debug Information](docs/chapter-09.md)
 
-Source locations have been traveling through the MLIR from the start of the
-chapter. A small custom MLIR pass adds the language-specific compile-unit,
-function, and variable information before translation turns it into LLVM debug
+We build a small custom MLIR pass adds the language-specific compile-unit,
+function, and variable information before translation turns source locations into LLVM debug
 metadata and, eventually, DWARF.
 
 This is our first custom pass. The implementation is slightly fiddly because
