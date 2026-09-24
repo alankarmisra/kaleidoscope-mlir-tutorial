@@ -21,6 +21,7 @@ build.ninja
 # Editor and operating-system files
 .DS_Store
 .cache/
+.vscode/
 *.swp
 .vscode/c_cpp_properties.json
 docs/llvm-compatibility.md
