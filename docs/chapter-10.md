@@ -12,7 +12,7 @@ def test(x)
     (y = y + 1) * y;
 ```
 
-Up to now, when our compiler saw `x` and `y`, it immediately turned them into anonymous memory allocations. They still worked as variables, but MLIR no longer knew their *names*. If you looked at the generated IR, you'd see `%0`, `%1`, `%2` — not `x` and `y`.
+Up to now, when our compiler saw `x` and `y`, it immediately turned them into generic memory allocations. They still worked as variables, but nothing in the IR recorded that these allocations were the source variables `x` and `y`. The printed names `%0`, `%1`, and `%2` you might see in a dump are just SSA value labels MLIR assigns at printing time — they aren't evidence either way about what information was preserved. The real loss is semantic: the allocation had no attribute saying "this represents a source variable named `x`."
 
 In Chapter 9, we worked around this by saving the parameter names separately and stitching them back together later. That worked, but it was a patch. Ideally, we wouldn't lose the information in the first place.
 
@@ -41,9 +41,9 @@ Notice that everything else still uses the standard dialects you already know: `
 
 ## Step 1: Define the Dialect
 
-MLIR dialects are usually defined with **TableGen** — a compact way to describe operations that MLIR then expands into the C++ boilerplate for you. If you've never used it, think of it as a schema language: you describe *what* you want, and TableGen generates *how* it's implemented.
+MLIR dialects are usually defined with **TableGen** — a compact way to describe operations. From that description, MLIR generates the C++ representation of each operation, its builders and accessors, its parser and printer, and the scaffolding for verification. What TableGen does *not* generate is behavior: the actual lowering of each operation, and any custom verification logic you want beyond the structural checks, remain yours to write.
 
-Create a file called `KaleidoscopeOps.td` and start with the dialect itself:
+Create a file called KaleidoscopeOps.td and start with the dialect itself:
 
 ```tablegen
 include "mlir/IR/OpBase.td"
@@ -64,7 +64,7 @@ Let's unpack the important fields:
 
 ## Step 2: Add a Variable Type
 
-We need a way to say "this SSA value is a named variable" — distinct from "this SSA value is an `f64`." That's a **type**. Add this to your `.td` file:
+We need a way to say "this SSA value represents a variable" — distinct from "this SSA value is an `f64`." That's a **type**. The variable's source name will be stored separately as an attribute on the operation. Add this to the TableGen file:
 
 ```tablegen
 def Kaleidoscope_VariableType
@@ -114,13 +114,19 @@ Here's what each field does:
 - **`arguments`** — everything the operation takes in:
   - `F64:$initialValue` — an SSA operand that must be an `f64`
   - `StrAttr:$name` — a string attribute holding the source name
-  - `I64Attr:$argumentNumber` — a number telling DWARF which function parameter this is (`0` = local variable, `1`+ = parameter, since DWARF numbers parameters starting at 1)
+  - `I64Attr:$argumentNumber` — a number telling DWARF which function parameter this is (`0` = local variable, `1`+ = parameter, since DWARF numbers parameters starting at 1). `I64Attr` stores it as a fixed 64-bit integer attribute, which is simple and large enough for any realistic parameter number.
 - **`results`** — an SSA result of type `!kaleidoscope.var`
 - **`assemblyFormat`** — the textual syntax. Backticks are literal punctuation; `$name` and `$initialValue` refer to fields above; `attr-dict` prints leftover attributes; `type($initialValue)` prints the operand's type.
 
 The `$` names also generate C++ accessors, so you'll write `getInitialValue()`, `getName()`, and `getArgumentNumber()` in your code.
 
-Here's the actual IR this produces for parameter `x`:
+For example, consider a function with one parameter named `x`:
+
+```kaleidoscope
+def test(x) x;
+```
+
+At the beginning of the generated function, `x` is represented by this operation:
 
 ```mlir
 %0 = kaleidoscope.var "x" = %arg0 {argumentNumber = 1 : i64} : f64
@@ -128,11 +134,11 @@ Here's the actual IR this produces for parameter `x`:
 
 Let's read that piece by piece:
 
-- **`%0`** — an SSA value representing the *variable itself*, not the value inside it. Subsequent `read` and `assign` operations use `%0` to refer to this variable.
-- **`"x"`** — the name from the source.
-- **`%arg0`** — the initial value stored in the variable (in this case, the function's first argument).
-- **`{argumentNumber = 1 : i64}`** — `x` is the first parameter (DWARF uses 1-based numbering). Locals use `0`.
-- **`: f64`** — the type of the *initial value*, not of `%0`. The `%0` value has type `!kaleidoscope.var`.
+- `%0` — an SSA value representing the *variable itself*, not the value inside it. Subsequent `read` and `assign` operations use `%0` to refer to this variable.
+- `"x"` — the name from the source.
+- `%arg0` — the initial value stored in the variable (in this case, the function's first argument).
+- `{argumentNumber = 1 : i64}` — `x` is the first parameter (DWARF uses 1-based numbering). Locals use `0`.
+- `: f64` — the type of the *initial value*, not of `%0`. The `%0` value has type `!kaleidoscope.var`.
 
 ### 3b. The `read` and `assign` Operations
 
@@ -153,13 +159,13 @@ def Kaleidoscope_AssignOp : Kaleidoscope_Op<"assign", []> {
 }
 ```
 
-These are straightforward: `read` takes a variable and returns its `f64` value; `assign` takes a variable and an `f64` and stores the new value.
+These are straightforward: `read` takes a variable and returns its `f64` value; `assign` takes a variable and an `f64` and stores the new value. Note that `assign` produces no SSA result. We'll see below how the AST generator preserves Kaleidoscope's expression semantics — where an assignment evaluates to the assigned value — without needing one.
 
 > **Important detail:** Notice that `read` is *not* marked `Pure`. Two reads of the same variable might return different values if an assignment happened in between. If we marked it pure, MLIR's common-subexpression elimination would wrongly merge the two reads into one.
 
 ## Step 4: Generate the C++ Classes
 
-TableGen files describe operations, but your compiler needs C++ classes. The `mlir-tblgen` tool reads your `.td` file and generates header and implementation fragments. Add this to your `CMakeLists.txt`:
+TableGen files describe operations, but your compiler needs C++ classes. The `mlir-tblgen` tool reads the TableGen file and generates header and implementation fragments. Add this to CMakeLists.txt:
 
 ```cmake
 set(LLVM_TARGET_DEFINITIONS KaleidoscopeOps.td)
@@ -173,9 +179,18 @@ mlir_tablegen(KaleidoscopeTypes.cpp.inc -gen-typedef-defs
   -typedefs-dialect=kaleidoscope)
 mlir_tablegen(KaleidoscopeOps.h.inc -gen-op-decls)
 mlir_tablegen(KaleidoscopeOps.cpp.inc -gen-op-defs)
+
+add_custom_target(KaleidoscopeOpsIncGen DEPENDS
+  KaleidoscopeDialect.h.inc
+  KaleidoscopeDialect.cpp.inc
+  KaleidoscopeTypes.h.inc
+  KaleidoscopeTypes.cpp.inc
+  KaleidoscopeOps.h.inc
+  KaleidoscopeOps.cpp.inc
+)
 ```
 
-Six invocations, each asking for a different piece: dialect declarations, dialect definitions, type declarations, type definitions, operation declarations, and operation definitions.
+Six invocations, each asking for a different piece: dialect declarations, dialect definitions, type declarations, type definitions, operation declarations, and operation definitions. The `add_custom_target` groups all six generated files under one target name so that later `add_dependencies` calls can require all of them at once.
 
 These `.inc` files are generated into your build directory (not your source tree), which is why you need:
 
@@ -250,7 +265,7 @@ return TheBuilder->create<kaleidoscope::ReadOp>(
     getLocation(), TheBuilder->getF64Type(), It->second);
 ```
 
-**Assigning to a variable** becomes an `assign` (which, like before, also returns the assigned value so it can be used in expressions):
+**Assigning to a variable** emits an `assign` operation. That operation has no SSA result, so `BinaryExprAST::codegen()` emits it for its side effect and then returns `AssignedValue` separately. That's what preserves Kaleidoscope's expression semantics, where `(y = y + 1)` evaluates to the newly assigned value:
 
 ```cpp
 TheBuilder->create<kaleidoscope::AssignOp>(getLocation(), It->second,
@@ -274,9 +289,9 @@ Locals and loop variables pass `0` instead.
 
 **Bonus:** We can now delete the `FunctionParameters` map from Chapter 9. Each declaration carries its own name, location, and argument number, so there's nothing to reconstruct later.
 
-## Step 6: Lower the Dialect to LLVM
+## Step 6: Lower the Dialect to the LLVM Dialect
 
-When lowering time comes, we convert each `kaleidoscope.*` operation to LLVM IR.
+When lowering time comes, we convert each `kaleidoscope.*` operation into operations in MLIR's **LLVM dialect**. Note carefully: the LLVM dialect is still MLIR. It is not LLVM IR. Translation to actual LLVM IR happens later in the pipeline, after all our lowering passes have run. The MLIR LLVM dialect is what we lower *to* here; the translation step is a separate, final stage.
 
 **A declaration** becomes an allocation plus an initializing store:
 
@@ -325,11 +340,11 @@ if (failed(applyPartialConversion(getOperation(), Target,
   signalPassFailure();
 ```
 
-Without `addIllegalDialect`, a buggy pattern could silently skip an operation and pass IR with dangling `kaleidoscope` ops to the LLVM backend. Declaring the dialect illegal makes that failure loud.
+Without `addIllegalDialect`, a buggy pattern could silently skip an operation and pass IR with dangling `kaleidoscope` ops to the LLVM dialect translation step. Declaring the dialect illegal makes that failure loud.
 
 ## Step 7: Wire Up the Pass Pipeline
 
-The order matters here. First, lower the standard high-level dialects down to LLVM. Then run our Chapter 9 debug pass to create the compile unit and function scopes:
+The order matters here. First, lower the standard high-level dialects down to the LLVM dialect. Then run our Chapter 9 debug pass to create the compile unit and function scopes:
 
 ```cpp
 PassManager DebugPM(TheContext.get());
@@ -352,7 +367,7 @@ DebugPM.addPass(
     LLVM::createDIScopeForLLVMFuncOpPass(std::move(DebugOptions)));
 ```
 
-The resulting LLVM IR looks like this:
+After all MLIR passes have finished, the module is in the LLVM dialect. From there, the standard translation step turns it into LLVM IR:
 
 ```llvm
 %x = alloca double, i64 1, align 8
@@ -360,7 +375,7 @@ store double %arg0, ptr %x, align 8
 #dbg_declare(ptr %x, !variable, !DIExpression(), !location)
 ```
 
-From here, everything downstream — translation, JIT, object emission, DWARF generation — proceeds unchanged.
+Once we're at LLVM IR, everything downstream — JIT, object emission, DWARF generation — proceeds unchanged.
 
 ## Step 8: Try It Out
 
@@ -438,11 +453,11 @@ cmake --build build --target check-chapter-10
 
 The full implementation is spread across these files:
 
-- **`toy.cpp`** — the compiler and the variable-lowering pass
-- **`KaleidoscopeOps.td`** — the variable type and operation definitions
-- **`KaleidoscopeDialect.h` / `.cpp`** — connects generated classes to the compiler
-- **`KaleidoscopeDebugInfo.h` / `.cpp`** — creates compile-unit and function scopes
-- **`CMakeLists.txt`** — runs TableGen and builds the executable
+- toy.cpp — the compiler and the variable-lowering pass
+- KaleidoscopeOps.td — the variable type and operation definitions
+- KaleidoscopeDialect.h / KaleidoscopeDialect.cpp — connects generated classes to the compiler
+- KaleidoscopeDebugInfo.h / KaleidoscopeDebugInfo.cpp — creates compile-unit and function scopes
+- CMakeLists.txt — runs TableGen and builds the executable
 
 ### Build Configuration
 
