@@ -46,6 +46,7 @@ MLIR dialects are usually defined with **TableGen**, a compact way to describe o
 Create a file called KaleidoscopeOps.td and start with the dialect itself:
 
 ```tablegen
+// KaleidoscopeOps.td
 // Provides the TableGen definitions for MLIR dialects, types, and operations.
 include "mlir/IR/OpBase.td"
 
@@ -445,23 +446,41 @@ Once we're at LLVM IR, everything downstream, including JIT, object emission, an
 
 ## Step 8: Try It Out
 
-Let's verify everything works. Run the interpreter:
+Configure and build the example first, setting `MLIR_DIR` to the directory containing `MLIRConfig.cmake` in your LLVM build:
 
+```bash
+cmake -S . -B build \
+  -DMLIR_DIR=/path/to/llvm-project/build/lib/cmake/mlir
+cmake --build build
+```
+
+Now run the interpreter:
+
+<!-- code-merge:start  -->
 ```text
+$ ./build/toy
+```
+```kaleidoscope
 ready> def test(x) var y = x in (y = y + 1) * y;
-Read function definition:
 ready> test(4);
+```
+```text
 Evaluated to 25.000000
 ```
+<!-- code-merge:end  -->
 
 Now dump the MLIR before lowering to see your named variables:
 
+<!-- code-merge:start  -->
 ```text
 $ ./build/toy --dump-mlir
+```
+```kaleidoscope
 ready> def test(x) var y = x in (y = y + 1) * y;
+```
+```text
 Read function definition:
 ```
-
 ```mlir
 func.func @test(%arg0: f64) -> f64 {
   %cst = arith.constant 1.000000e+00 : f64
@@ -476,15 +495,22 @@ func.func @test(%arg0: f64) -> f64 {
   return %6 : f64
 }
 ```
+<!-- code-merge:end  -->
 
 And the LLVM IR after lowering, where variables have become stack allocations with debug declarations attached:
 
+<!-- code-merge:start  -->
 ```text
 $ ./build/toy --dump-llvm-ir
+```
+```kaleidoscope
 ready> def test(x) var y = x in (y = y + 1) * y;
 ```
-
 ```llvm
+; ModuleID = 'LLVMDialectModule'
+source_filename = "LLVMDialectModule"
+target datalayout = "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
+
 define double @test(double %0) !dbg !3 {
   %2 = alloca double, i64 1, align 8, !dbg !6
   store double %0, ptr %2, align 8, !dbg !6
@@ -501,31 +527,47 @@ define double @test(double %0) !dbg !3 {
   ret double %8, !dbg !6
 }
 
-!7 = !DILocalVariable(name: "x", arg: 1, scope: !3, file: !1, line: 1, type: !8)
-!11 = !DILocalVariable(name: "y", scope: !3, file: !1, line: 1, type: !8)
-```
+; Function Attrs: nocallback nofree nosync nounwind speculatable willreturn memory(none)
+declare void @llvm.dbg.declare(metadata, metadata, metadata) #0
 
-The first declaration describes parameter `x`; the second describes local `y`. Notice that `arg: 1` matches the `argumentNumber` we set on the declaration.
+attributes #0 = { nocallback nofree nosync nounwind speculatable willreturn memory(none) }
+
+!llvm.dbg.cu = !{!0}
+!llvm.module.flags = !{!2}
+
+!0 = distinct !DICompileUnit(language: DW_LANG_C, file: !1, producer: "Kaleidoscope", isOptimized: true, runtimeVersion: 0, emissionKind: FullDebug)
+!1 = !DIFile(filename: "<stdin>", directory: "")
+!2 = !{i32 2, !"Debug Info Version", i32 3}
+!3 = distinct !DISubprogram(name: "test", linkageName: "test", scope: !1, file: !1, line: 1, type: !4, scopeLine: 1, spFlags: DISPFlagDefinition | DISPFlagOptimized, unit: !0)
+!4 = !DISubroutineType(cc: DW_CC_normal, types: !5)
+!5 = !{}
+!6 = !DILocation(line: 1, column: 5, scope: !3)
+!7 = !DILocalVariable(name: "x", arg: 1, scope: !3, file: !1, line: 1, type: !8)
+!8 = !DIBasicType(name: "double", size: 64, encoding: DW_ATE_float)
+!9 = !DILocation(line: 1, column: 21, scope: !3)
+!10 = !DILocation(line: 1, column: 13, scope: !3)
+!11 = !DILocalVariable(name: "y", scope: !3, file: !1, line: 1, type: !8)
+!12 = !DILocation(line: 1, column: 31, scope: !3)
+!13 = !DILocation(line: 1, column: 33, scope: !3)
+!14 = !DILocation(line: 1, column: 29, scope: !3)
+!15 = !DILocation(line: 1, column: 40, scope: !3)
+!16 = !DILocation(line: 1, column: 38, scope: !3)
+```
+<!-- code-merge:end  -->
 
 ## Where the Code Lives
 
 The full implementation is spread across these files:
 
-- toy.cpp: the compiler and the variable-lowering pass
-- KaleidoscopeOps.td: the variable type and operation definitions
-- KaleidoscopeDialect.h / KaleidoscopeDialect.cpp: connects generated classes to the compiler
-- KaleidoscopeDebugInfo.h / KaleidoscopeDebugInfo.cpp: creates compile-unit and function scopes
-- CMakeLists.txt: runs TableGen and builds the executable
+- `toy.cpp`: the compiler and the variable-lowering pass
+- `KaleidoscopeOps.td`: the variable type and operation definitions
+- `KaleidoscopeDialect.h` / `KaleidoscopeDialect.cpp`: connects generated classes to the compiler
+- `KaleidoscopeDebugInfo.h` / `KaleidoscopeDebugInfo.cpp`: creates compile-unit and function scopes
+- `CMakeLists.txt`: runs TableGen and builds the executable
 
 ### Build Configuration
 
 ```cmake(../code/chapter-10/CMakeLists.txt)
-```
-
-Build as usual:
-
-```bash
-./build.sh
 ```
 
 ### Compiler
