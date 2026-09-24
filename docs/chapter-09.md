@@ -164,7 +164,7 @@ FunctionParameters[P.getName()] = P.getArgs();
 
 We could walk the lowered module and add the remaining debug attributes here, but that work is a natural fit for an MLIR pass. A pass is a structured way to inspect or transform some IR, and frontends can add their own passes alongside the ones supplied by MLIR.
 
-Our `KaleidoscopeDebugInfoPass` runs after lowering to the LLVM dialect. It creates the compile unit, describes each function and its parameters, and connects those parameters to their lowered stack storage. The source language is recorded as C because Kaleidoscope follows the C calling convention and ABI. The implementation lives in [KaleidoscopeDebugInfo.cpp](https://github.com/alankarmisra/kaleidoscope-mlir-tutorial/blob/main/code/chapter-09/KaleidoscopeDebugInfo.cpp) for readers interested in the debug metadata itself. The general machinery for writing a pass is described in MLIR's [Pass Infrastructure](https://mlir.llvm.org/docs/PassManagement/#pass-creation) documentation.
+Our `KaleidoscopeDebugInfoPass` runs after lowering to the LLVM dialect. It creates the compile unit, describes each function and its parameters, and connects those parameters to their lowered stack storage. DWARF has no language identifier for Kaleidoscope, so this tutorial records C as a practical stand-in. The implementation lives in [KaleidoscopeDebugInfo.cpp](https://github.com/alankarmisra/kaleidoscope-mlir-tutorial/blob/main/code/chapter-09/KaleidoscopeDebugInfo.cpp) for readers interested in the debug metadata itself. The general machinery for writing a pass is described in MLIR's [Pass Infrastructure](https://mlir.llvm.org/docs/PassManagement/#pass-creation) documentation.
 
 The pass is exposed through a small creation function:
 
@@ -220,17 +220,17 @@ fib.o: file format Mach-O arm64
                 DW_AT_linkage_name        ("fib")
                 DW_AT_name                ("fib")
                 DW_AT_decl_file           ("fib.ks")
-                DW_AT_decl_line           (1)
+                DW_AT_decl_line           (2)
                 DW_AT_external            (true)
 
 0x0000003f:     DW_TAG_formal_parameter
                   DW_AT_location  (DW_OP_fbreg +24)
                   DW_AT_name      ("x")
                   DW_AT_decl_file ("fib.ks")
-                  DW_AT_decl_line (1)
-                  DW_AT_type      (0x0000004e "double")
+                  DW_AT_decl_line (2)
+                  DW_AT_type      (0x00000067 "double")
 
-0x0000004e:   DW_TAG_base_type
+0x00000067:   DW_TAG_base_type
                 DW_AT_name      ("double")
                 DW_AT_encoding  (DW_ATE_float)
                 DW_AT_byte_size (0x08)

@@ -602,10 +602,6 @@ The full implementation is spread across these files:
 
 ## Wrapping Up
 
-Our dialect is intentionally tiny: three operations and a type. That's the point.
-
-We built it because a source variable knows things an anonymous allocation doesn't: its name, its location in the source, and its parameter number. By keeping that knowledge alive in the IR until the moment of lowering, we can generate storage *and* debug information together, instead of reconstructing the relationship after the fact.
-
-That's the real reason to reach for a dialect: it lets your compiler hold onto the concepts that matter to *your* language, for exactly as long as it needs to, before expressing them in more general operations.
+Our dialect is small: it has only three operations and one type. It remembers useful details about each variable, like its name, where it appears in the source code, and whether it is a function parameter. We keep those details around until we create the lower-level code, which makes it easier to generate storage and debugging information correctly.
 
 If you want to take this further, the next natural step would be moving the entire Kaleidoscope AST into a dialect. The [MLIR Toy tutorial](https://mlir.llvm.org/docs/Tutorials/Toy/) shows what that architecture looks like. But for the problem we set out to solve, three operations were enough.
