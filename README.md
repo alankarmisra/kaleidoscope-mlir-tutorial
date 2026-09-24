@@ -144,7 +144,3 @@ The documentation lives in `docs/`, and the matching implementation lives in
 This follows the structure and many of the ideas of LLVM's Kaleidoscope
 tutorial, and it owes an obvious debt to the MLIR Toy tutorial too. It is an
 independent experiment, not official LLVM documentation.
-
-The code also values being readable in a tutorial over looking like a polished
-production compiler. There are globals, shortcuts, and choices you would
-probably revisit in a larger project. That is part of the charm.
