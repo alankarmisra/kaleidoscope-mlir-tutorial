@@ -542,5 +542,3 @@ Here is the code:
 
 ```cpp(../code/chapter-02/toy.cpp)
 ```
-
-[Next: Implementing Code Generation to MLIR](chapter-03.md)

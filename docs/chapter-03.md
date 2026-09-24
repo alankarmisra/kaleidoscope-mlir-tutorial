@@ -452,5 +452,3 @@ Here is the code:
 
 ```cpp(../code/chapter-03/toy.cpp)
 ```
-
-[Next: Adding JIT and Optimizer Support](chapter-04.md)

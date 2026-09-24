@@ -163,7 +163,7 @@ FunctionParameters[P.getName()] = P.getArgs();
 
 We could walk the lowered module and add the remaining debug attributes here, but that work is a natural fit for an MLIR pass. A pass is a structured way to inspect or transform some IR, and frontends can add their own passes alongside the ones supplied by MLIR.
 
-Our `KaleidoscopeDebugInfoPass` runs after lowering to the LLVM dialect. It creates the compile unit, describes each function and its parameters, and connects those parameters to their lowered stack storage. The source language is recorded as C because Kaleidoscope follows the C calling convention and ABI. The implementation lives in [`KaleidoscopeDebugInfo.cpp`](../code/chapter-09/KaleidoscopeDebugInfo.cpp) for readers interested in the debug metadata itself. The general machinery for writing a pass is described in MLIR's [Pass Infrastructure](https://mlir.llvm.org/docs/PassManagement/#pass-creation) documentation.
+Our `KaleidoscopeDebugInfoPass` runs after lowering to the LLVM dialect. It creates the compile unit, describes each function and its parameters, and connects those parameters to their lowered stack storage. The source language is recorded as C because Kaleidoscope follows the C calling convention and ABI. The implementation lives in [`KaleidoscopeDebugInfo.cpp`](https://github.com/alankarmisra/kaleidoscope-mlir-tutorial/blob/main/code/chapter-09/KaleidoscopeDebugInfo.cpp) for readers interested in the debug metadata itself. The general machinery for writing a pass is described in MLIR's [Pass Infrastructure](https://mlir.llvm.org/docs/PassManagement/#pass-creation) documentation.
 
 The pass is exposed through a small creation function:
 
@@ -268,5 +268,3 @@ And here is its implementation:
 
 ```cpp(../code/chapter-09/KaleidoscopeDebugInfo.cpp)
 ```
-
-[Next: Conclusion and other useful LLVM tidbits](chapter-10.md)

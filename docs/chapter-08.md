@@ -252,6 +252,3 @@ Here the output confirms that LLVM emitted an AArch64 ELF object rather than a n
 
 ```cpp(../code/chapter-08/toy.cpp)
 ```
-
-
-[Next: Adding Debug Information](chapter-09.md)

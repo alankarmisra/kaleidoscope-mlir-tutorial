@@ -131,5 +131,3 @@ We handle comments by skipping to the end of the line and then return the next t
 ```
 
 With this, we have the complete lexer for the basic Kaleidoscope language (the [full code listing](chapter-02.md#full-code-listing) for the Lexer is available in the [next chapter](chapter-02.md) of the tutorial). Next we'll [build a simple parser that uses this to build an Abstract Syntax Tree](chapter-02.md). When we have that, we'll include a driver so that you can use the lexer and parser together.
-
-[Next: Implementing a Parser and AST](chapter-02.md)

@@ -513,5 +513,3 @@ Here is the code:
 
 ```cpp(../code/chapter-04/toy.cpp)
 ```
-
-[Next: Extending the language: control flow](chapter-05.md)

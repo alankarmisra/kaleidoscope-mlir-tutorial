@@ -869,5 +869,3 @@ Here is the code:
 
 ```cpp(../code/chapter-05/toy.cpp)
 ```
-
-[Next: Extending the language: user-defined operators](chapter-06.md)

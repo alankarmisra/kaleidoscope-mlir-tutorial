@@ -545,5 +545,3 @@ Here is the code:
 
 ```cpp(../code/chapter-07/toy.cpp)
 ```
-
-[Next: Compiling to Object Code](chapter-08.md)

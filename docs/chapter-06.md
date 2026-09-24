@@ -656,5 +656,3 @@ Here is the code:
 
 ```cpp(../code/chapter-06/toy.cpp)
 ```
-
-[Next: Extending the language: mutable variables / SSA construction](chapter-07.md)

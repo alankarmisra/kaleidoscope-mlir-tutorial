@@ -373,5 +373,3 @@ Use the chapter's build script as before:
 Our custom dialect is deliberately small. We introduced it because a source variable knows more than an anonymous allocation: it has a name, a source location, and perhaps an argument number. Preserving that information until lowering lets us generate storage and debug information together instead of reconstructing their relationship afterward.
 
 This is the central reason to create a dialect. It lets a compiler retain the concepts that matter to its source language until it is ready to express them in more general operations. A future chapter could take the next step and represent the complete Kaleidoscope AST as a dialect; the MLIR Toy tutorial shows what that larger design looks like.
-
-[Next: Conclusion and other useful LLVM tidbits](chapter-11.md)
