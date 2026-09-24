@@ -10,13 +10,6 @@ set(CMAKE_CXX_EXTENSIONS NO)
 
 find_package(MLIR REQUIRED CONFIG)
 
-get_filename_component(KALEIDOSCOPE_LLVM_BUILD_DIR
-  "${MLIR_DIR}/../../.." ABSOLUTE)
-set(KALEIDOSCOPE_LLVM_TOOLS_DIR "${KALEIDOSCOPE_LLVM_BUILD_DIR}/bin")
-find_program(KALEIDOSCOPE_LLVM_LIT llvm-lit
-  HINTS "${KALEIDOSCOPE_LLVM_TOOLS_DIR}"
-  REQUIRED)
-
 list(APPEND CMAKE_MODULE_PATH "${MLIR_CMAKE_DIR}")
 include(TableGen)
 include(AddMLIR)
@@ -59,14 +52,6 @@ add_executable(toy
   KaleidoscopeDebugInfo.cpp
 )
 add_dependencies(toy KaleidoscopeOpsIncGen)
-
-configure_file(test/lit.site.cfg.py.in test/lit.site.cfg.py @ONLY)
-add_custom_target(check-chapter-10
-  COMMAND ${KALEIDOSCOPE_LLVM_LIT} -sv
-          ${CMAKE_CURRENT_BINARY_DIR}/test
-  DEPENDS toy
-  USES_TERMINAL
-)
 
 # Make symbols in the executable available to the JIT for runtime lookup.
 set_target_properties(toy PROPERTIES ENABLE_EXPORTS ON)

@@ -11,10 +11,14 @@ namespace {
 
 using FunctionParameterMap = std::map<std::string, std::vector<std::string>>;
 
-/// Follow the address-producing operations inserted during lowering until we
-/// reach the llvm.alloca that owns the variable's stack storage. A debug
-/// declaration describes the variable's storage, not an intermediate cast or
-/// address calculation derived from it.
+/// Walk backwards from a value produced during lowering until we reach the
+/// llvm.alloca that owns its stack storage.
+///
+/// A debug declaration describes the storage for a variable, not a temporary
+/// value derived from it. Lowering may insert address calculations, bitcasts,
+/// or other operations between the source variable and its alloca, so we
+/// follow the operand chain until we find the alloca itself. Returns a null
+/// Value if no alloca is found.
 static Value findUnderlyingAlloca(Value value) {
   Operation *definingOp = value.getDefiningOp();
   if (!definingOp)
@@ -46,9 +50,9 @@ public:
     ModuleOp module = getOperation();
     MLIRContext *context = module.getContext();
 
-    // DWARF describes source files using a filename and directory separately.
-    // Input read from the REPL has no real path, so use a synthetic <stdin>
-    // file instead.
+    // A DWARF file entry is a pair of (directory, filename), not a single
+    // path. Input read interactively from the REPL has no real path at all,
+    // so we invent a synthetic <stdin> file to describe it.
     StringRef inputPath = inputFilename;
     auto file = inputPath.empty()
                     ? LLVM::DIFileAttr::get(context, "<stdin>", "")
@@ -57,28 +61,31 @@ public:
                           llvm::sys::path::parent_path(inputPath));
 
     // The compile unit is the top-level debug record for this translation
-    // unit. DistinctAttr gives it identity: two otherwise identical compile
-    // units must not be merged merely because their fields compare equal.
+    // unit. Wrapping it in a DistinctAttr guarantees it will not be merged
+    // with another compile unit that happens to have identical fields, which
+    // would be a DWARF-validity bug.
     auto compileUnit = LLVM::DICompileUnitAttr::get(
         DistinctAttr::create(UnitAttr::get(context)), llvm::dwarf::DW_LANG_C,
         file, StringAttr::get(context, "Kaleidoscope"),
         /*isOptimized=*/optLevel != '0', LLVM::DIEmissionKind::Full);
 
-    // MLIR carries debug metadata in locations. Preserve the module's original
-    // location and fuse the compile-unit metadata into it so translation to
-    // LLVM IR can recover both pieces of information.
+    // MLIR carries debug metadata on locations rather than on a separate
+    // side table. Fusing the compile unit into the module's location is how
+    // we attach it so that LLVM IR translation can recover it later.
     module->setLoc(FusedLoc::get(context, {module.getLoc()}, compileUnit));
 
-    // All Kaleidoscope values currently have the same source-level type.
-    // Reuse this metadata when describing each function parameter.
+    // Kaleidoscope has exactly one source-level type today. Every parameter
+    // we describe below uses this same DWARF base type.
     auto doubleType =
         LLVM::DIBasicTypeAttr::get(context, llvm::dwarf::DW_TAG_base_type,
                                    "double", 64, llvm::dwarf::DW_ATE_float);
     auto emptyExpression = LLVM::DIExpressionAttr::get(context);
 
     for (LLVM::LLVMFuncOp function : module.getOps<LLVM::LLVMFuncOp>()) {
-      // Prefer the function's own source file and line. Fall back to the
-      // module input and line 1 when the parser supplied no concrete location.
+      // Choose the DIFile and source line for this function, preferring the
+      // information recorded on the function's source location. When the
+      // parser supplied no concrete location, fall back to the module's input
+      // file and line 1.
       Location originalLoc = function.getLoc();
       LLVM::DIFileAttr functionFile = file;
       int64_t line = 1;
@@ -90,10 +97,11 @@ public:
         line = fileLoc.getLine();
       }
 
-      // A definition owns a distinct DISubprogram and belongs to this compile
-      // unit. An external declaration has no body emitted by this compile unit,
-      // so it is described without a compile-unit attachment or Definition
-      // flag.
+      // A definition and an external declaration need different DISubprogram
+      // configurations. A definition belongs to this compile unit, carries a
+      // distinct identity so it will not be merged with an identical-looking
+      // subprogram, and is marked as a Definition. A declaration has no body
+      // emitted by this compile unit, so it gets neither attachment.
       DistinctAttr id;
       LLVM::DICompileUnitAttr functionCompileUnit = compileUnit;
       auto flags = static_cast<LLVM::DISubprogramFlags>(0);
@@ -106,9 +114,11 @@ public:
         flags = flags | LLVM::DISubprogramFlags::Definition;
       }
 
-      // Kaleidoscope has only double-valued functions, but this tutorial does
-      // not yet encode a complete DWARF function signature. The subroutine type
-      // still establishes the metadata node required by DISubprogram.
+      // Kaleidoscope has no source-level function signatures yet, so we
+      // cannot describe parameter or return types accurately here. An empty
+      // DISubroutineType is the minimum required to attach a DISubprogram;
+      // the parameters themselves are described later by DILocalVariable
+      // entries on their stack slots.
       auto functionType = LLVM::DISubroutineTypeAttr::get(
           context, llvm::dwarf::DW_CC_normal, {});
       auto name = function.getNameAttr();
@@ -117,13 +127,15 @@ public:
           functionFile, line, line, flags, functionType,
           /*retainedNodes=*/{}, /*annotations=*/{});
 
-      // Fuse the subprogram scope into the existing source location. Later
-      // lowering and LLVM IR translation use this scope for instructions in
-      // the function body.
+      // Fuse the subprogram scope into the function's existing location.
+      // Later lowering and LLVM IR translation will use this scope for
+      // instructions emitted inside the function body.
       function->setLoc(FusedLoc::get(context, {originalLoc}, scope));
 
-      // Declarations have no entry block or local variables. A definition may
-      // also be absent from the side table when it was compiler-generated.
+      // Declarations have no body, and a definition may be absent from the
+      // parser-side parameter table when it was generated by the compiler
+      // rather than written by the user. In the latter case, the function may
+      // still have parameters, but this pass does not know their source names.
       auto names = functionParameters.find(function.getName().str());
       if (function.isExternal() || names == functionParameters.end())
         continue;
@@ -136,9 +148,10 @@ public:
 
         BlockArgument argument = entryBlock.getArgument(argumentNumber);
 
-        // Mutable Kaleidoscope parameters are copied into stack slots during
-        // lowering. Find the store of this incoming argument so we can connect
-        // the source variable to the address that subsequently holds it.
+        // A mutable Kaleidoscope parameter is copied into a stack slot at
+        // the top of the entry block. Locate the store of the incoming
+        // argument so we can point the debug declaration at the stack slot
+        // rather than at the argument itself.
         LLVM::StoreOp argumentStore;
         for (LLVM::StoreOp store : entryBlock.getOps<LLVM::StoreOp>()) {
           if (store.getValue() == argument) {
@@ -149,18 +162,25 @@ public:
         if (!argumentStore)
           continue;
 
-        // DWARF argument numbers are one-based. The source name comes from the
-        // parser-side table because LLVM block arguments do not retain it.
+        // DWARF argument numbers are one-based. The source name comes from
+        // the parser-side table because LLVM block arguments do not retain
+        // it. The scope, file, and line are inherited from the enclosing
+        // function.
         auto variable = LLVM::DILocalVariableAttr::get(
             scope, parameterName, scope.getFile(), scope.getLine(),
             argumentNumber + 1, /*alignInBits=*/0, doubleType,
             LLVM::DIFlags::Zero);
+
+        // The store's address operand may be an intermediate value rather
+        // than the alloca itself. Walk back to the alloca if one exists;
+        // otherwise, fall back to the store's own address.
         Value variableAddress = findUnderlyingAlloca(argumentStore.getAddr());
         if (!variableAddress)
           variableAddress = argumentStore.getAddr();
 
-        // llvm.dbg.declare tells the debugger that this address is the storage
-        // for the named source parameter. It does not generate executable code.
+        // llvm.dbg.declare attaches the debug variable to the storage
+        // address. It emits no executable code — it is a hint for the
+        // debugger, translated to a #dbg_declare record in LLVM IR.
         OpBuilder builder(argumentStore);
         builder.setInsertionPointAfter(argumentStore);
         builder.create<LLVM::DbgDeclareOp>(
@@ -170,8 +190,8 @@ public:
   }
 
 private:
-  // Pass instances own their options because the caller's strings and maps may
-  // not outlive execution of the pass manager.
+  // The pass owns copies of these because the caller's strings and maps are
+  // not guaranteed to outlive execution of the pass manager.
   std::string inputFilename;
   char optLevel;
   FunctionParameterMap functionParameters;
@@ -179,7 +199,7 @@ private:
 
 } // namespace
 
-// Keep construction behind a small factory so toy.cpp does not need to know
+// Construction is hidden behind a factory so toy.cpp does not need to know
 // the concrete pass implementation type.
 std::unique_ptr<Pass> createKaleidoscopeDebugInfoPass(
     StringRef inputFilename, char optLevel,

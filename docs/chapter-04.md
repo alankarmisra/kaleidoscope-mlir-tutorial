@@ -238,7 +238,7 @@ static void HandleTopLevelExpression() {
       }
 
       // Create a ResourceTracker to track JIT'd memory allocated to our
-      // anonymous expression -- that way we can free it after executing.
+      // anonymous expression, so we can free it after executing.
       auto RT = TheJIT->getMainJITDylib().createResourceTracker();
 
       // Lower the MLIR module to LLVM IR and add it to the JIT.

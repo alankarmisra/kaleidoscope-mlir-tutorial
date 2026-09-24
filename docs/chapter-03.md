@@ -266,7 +266,7 @@ func.func private @foo(%arg0: f64) -> f64 {
 ```
 <!-- code-merge:end -->
 
-The MLIR verifier cannot catch this because both prototypes are parsed, but `FunctionAST::codegen()` finds the existing one-argument `@foo` created by the `extern` and reuses it without checking it against the two-argument definition. The resulting module therefore contains one internally valid function—but it is the wrong one-argument function.
+The MLIR verifier cannot catch this because both prototypes are parsed, but `FunctionAST::codegen()` finds the existing one-argument `@foo` created by the `extern` and reuses it without checking it against the two-argument definition. The resulting module therefore contains one internally valid function, but it is the wrong one-argument function.
 
 ## Private declarations
 
