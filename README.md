@@ -46,7 +46,7 @@ JIT-compiled code or an object file
 MLIR is not replacing LLVM in that picture. It gives us a few useful places to
 stand before LLVM takes over.
 
-## How the Chapters Drift
+## Drifts From The Original Kaleidoscope LLVM tutorial
 
 ### [Chapter 1: The Lexer](docs/chapter-01.md)
 
