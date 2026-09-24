@@ -2,17 +2,11 @@
 
 ## Chapter 4 Introduction
 
-Welcome to Chapter 4 of the "[Implementing a language with MLIR](chapter-00.md)" tutorial. Chapters 1-3 described the implementation
-of a simple language and added support for generating MLIR. This
-chapter describes two new techniques: adding optimizer support to your
-language, and adding JIT compiler support. These additions will
-demonstrate how to get nice, efficient code for the Kaleidoscope
-language.
+Welcome to Chapter 4 of the "[Implementing a language with MLIR](chapter-00.md)" tutorial. Chapters 1-3 described the implementation of a simple language and added support for generating MLIR. This chapter describes two new techniques: adding optimizer support to your language, and adding JIT compiler support. These additions will demonstrate how to get nice, efficient code for the Kaleidoscope language.
 
 ## Why We Need an Optimization Pipeline
 
-Our demonstration for Chapter 3 is elegant and easy to extend.
-Unfortunately, it does not produce wonderful code.
+Our demonstration for Chapter 3 is elegant and easy to extend. Unfortunately, it does not produce wonderful code.
 
 <!-- code-merge:start -->
 ```bash
@@ -42,42 +36,15 @@ While constant folding can be achieved by examining each operation locally, no a
 
 ## MLIR Optimization Passes
 
-MLIR provides many optimization passes, which do many different sorts of
-things and have different tradeoffs. Unlike other systems, MLIR doesn't
-hold to the mistaken notion that one set of optimizations is right for
-all languages and for all situations. MLIR allows a compiler implementor
-to make complete decisions about what optimizations to use, in which
-order, and in what situation.
+MLIR provides many optimization passes, which do many different sorts of things and have different tradeoffs. Unlike other systems, MLIR doesn't hold to the mistaken notion that one set of optimizations is right for all languages and for all situations. MLIR allows a compiler implementor to make complete decisions about what optimizations to use, in which order, and in what situation.
 
-As a concrete example, MLIR passes can be anchored on different kinds of
-operations. A pass anchored on `builtin.module` can examine and transform
-the entire module, while a pass anchored on `func.func` operates on one
-function at a time. This allows compiler implementors to choose the scope
-at which each transformation runs. For more information on passes and how
-they are run, see the
-[MLIR Pass Infrastructure](https://mlir.llvm.org/docs/PassManagement/)
-documentation and the
-[MLIR Passes](https://mlir.llvm.org/docs/Passes/)
-reference.
+As a concrete example, MLIR passes can be anchored on different kinds of operations. A pass anchored on `builtin.module` can examine and transform the entire module, while a pass anchored on `func.func` operates on one function at a time. This allows compiler implementors to choose the scope at which each transformation runs. For more information on passes and how they are run, see the [MLIR Pass Infrastructure](https://mlir.llvm.org/docs/PassManagement/) documentation and the [MLIR Passes](https://mlir.llvm.org/docs/Passes/) reference.
 
-For Kaleidoscope, we are currently generating functions on the fly, one
-at a time, as the user types them in. We aren't shooting for the
-ultimate optimization experience in this setting, but we also want to
-catch the easy and quick stuff where possible. As such, we will choose
-to run a few per-function optimizations as the user types the function
-in. A static Kaleidoscope compiler could take a simpler approach: generate
-all functions into one MLIR module, run an optimization pipeline over the
-completed module, lower it once, and emit the resulting object file.
+For Kaleidoscope, we are currently generating functions on the fly, one at a time, as the user types them in. We aren't shooting for the ultimate optimization experience in this setting, but we also want to catch the easy and quick stuff where possible. As such, we will choose to run a few per-function optimizations as the user types the function in. A static Kaleidoscope compiler could take a simpler approach: generate all functions into one MLIR module, run an optimization pipeline over the completed module, lower it once, and emit the resulting object file.
 
 In addition to the distinction between function and module passes, MLIR distinguishes transformation passes from analyses. Transformation passes mutate the IR. Analyses are read-only computations that transformations can request. MLIR computes and caches analyses on demand, invalidating them when the IR changes.
 
-In order to get per-function optimizations going, we need to set up an
-MLIR [PassManager](https://mlir.llvm.org/docs/PassManagement/) to hold
-and organize the optimizations that we want to run. Once we have that,
-we can add a set of optimizations nested under `func.func`. We'll need a
-new `PassManager` for each module that we want to optimize, so we'll add
-it to the function created in the previous chapter
-(`InitializeModule()`):
+In order to get per-function optimizations going, we need to set up an MLIR [PassManager](https://mlir.llvm.org/docs/PassManagement/) to hold and organize the optimizations that we want to run. Once we have that, we can add a set of optimizations nested under `func.func`. We'll need a new `PassManager` for each module that we want to optimize, so we'll add it to the function created in the previous chapter (`InitializeModule()`):
 
 ```cpp
 static void InitializeModuleAndManagers() {
@@ -109,9 +76,7 @@ Once the pass manager is set up, we use a series of `addNestedPass` calls to add
 
 In this case, we choose to add two optimization passes. The passes we choose here are a pretty standard set of "cleanup" optimizations that are useful for a wide variety of code. I won't delve into what they do but, believe me, they are a good starting place :).
 
-Once the `PassManager` is set up, we need to make use of it. We do this by
-running it after our newly created function is constructed (in
-`FunctionAST::codegen()`), but before it is returned to the client:
+Once the `PassManager` is set up, we need to make use of it. We do this by running it after our newly created function is constructed (in `FunctionAST::codegen()`), but before it is returned to the client:
 
 ```cpp
 if (Value RetVal = Body->codegen()) {
@@ -131,8 +96,7 @@ if (Value RetVal = Body->codegen()) {
   }
 ```
 
-As you can see, this is pretty straightforward. The `PassManager` runs the nested passes on each MLIR `func.func` operation in
-place, improving (hopefully) its body. With this in place, we can try our test above again:
+As you can see, this is pretty straightforward. The `PassManager` runs the nested passes on each MLIR `func.func` operation in place, improving (hopefully) its body. With this in place, we can try our test above again:
 
 ```mlir
 ready> def squareSum(x) (1+2+x)*(x+(1+2));
@@ -157,8 +121,7 @@ Code that is available in MLIR can have a wide variety of tools applied to it. F
 
 In this section, we'll add JIT compiler support to our interpreter. The basic idea that we want for Kaleidoscope is to have the user enter function bodies as they do now, but immediately evaluate the top-level expressions they type in. For example, if they type in "1 + 2;", we should evaluate and print out 3. If they define a function, they should be able to call it from the command line.
 
-In order to do this, we first prepare the environment to create code for the current native target and declare and initialize the JIT. This is done by calling some `InitializeNativeTarget*` functions and adding a global variable `TheJIT`, and initializing it in
-`main`:
+In order to do this, we first prepare the environment to create code for the current native target and declare and initialize the JIT. This is done by calling some `InitializeNativeTarget*` functions and adding a global variable `TheJIT`, and initializing it in `main`:
 
 ```cpp
 static std::unique_ptr<llvm::orc::KaleidoscopeJIT> TheJIT;
@@ -191,26 +154,11 @@ int main() {
 }
 ```
 
-The KaleidoscopeJIT class is a simple JIT included with this tutorial in
-[code/include/KaleidoscopeJIT.h](../code/include/KaleidoscopeJIT.h). In later
-chapters we will look at how it works and extend it with new features, but for
-now we will take it as given. Its API is very simple: `addModule` adds an LLVM
-IR module to the JIT, making its functions available for execution (with its
-memory managed by a `ResourceTracker`); and `lookup` allows us to look up
-pointers to the compiled code.
+The KaleidoscopeJIT class is a simple JIT included with this tutorial in [code/include/KaleidoscopeJIT.h](../code/include/KaleidoscopeJIT.h). In later chapters we will look at how it works and extend it with new features, but for now we will take it as given. Its API is very simple: `addModule` adds an LLVM IR module to the JIT, making its functions available for execution (with its memory managed by a `ResourceTracker`); and `lookup` allows us to look up pointers to the compiled code.
 
-The KaleidoscopeJIT accepts LLVM IR modules, not MLIR modules, so before
-we can add a module to the JIT we need to lower it. This happens in two
-steps. First, we use MLIR conversion passes to lower the `func` and
-`arith` dialects to the LLVM dialect. The LLVM dialect is still MLIR,
-but its operations and types closely represent LLVM IR. We then translate
-the resulting MLIR module into an LLVM IR module that can be handed to
-the JIT.
+The KaleidoscopeJIT accepts LLVM IR modules, not MLIR modules, so before we can add a module to the JIT we need to lower it. This happens in two steps. First, we use MLIR conversion passes to lower the `func` and `arith` dialects to the LLVM dialect. The LLVM dialect is still MLIR, but its operations and types closely represent LLVM IR. We then translate the resulting MLIR module into an LLVM IR module that can be handed to the JIT.
 
-This is mostly boilerplate that connects MLIR's lowering and translation
-infrastructure to the LLVM JIT. The details are shown here for
-completeness, but the same basic process can be reused whenever an MLIR
-module is lowered to LLVM IR for execution.
+This is mostly boilerplate that connects MLIR's lowering and translation infrastructure to the LLVM JIT. The details are shown here for completeness, but the same basic process can be reused whenever an MLIR module is lowered to LLVM IR for execution.
 
 ```cpp
 static llvm::Expected<llvm::orc::ThreadSafeModule> lowerToLLVM() {
@@ -263,8 +211,7 @@ static llvm::cl::opt<bool> DumpLLVMIR(
     llvm::cl::init(false));
 ```
 
-After translating the module and setting its data layout, `lowerToLLVM()`
-checks the option and prints the LLVM IR when requested:
+After translating the module and setting its data layout, `lowerToLLVM()` checks the option and prints the LLVM IR when requested:
 
 ```cpp
 if (DumpLLVMIR) {
@@ -314,32 +261,13 @@ static void HandleTopLevelExpression() {
     }
 ```
 
-If parsing and codegen succeed, the next step is to convert the MLIR module containing
-the top-level expression to LLVM IR and add the resulting LLVM IR module to the JIT. We do
-this by calling `lowerToLLVM` and passing its result to `addModule`, which
-triggers code generation for all the functions in the module. `addModule` also
-accepts a `ResourceTracker` which can be used to remove the module from the JIT
-later. Once the module has been added to the JIT it can no longer be
-modified, so we also open a new module to hold subsequent code by calling
-`InitializeModuleAndManagers()`.
+If parsing and codegen succeed, the next step is to convert the MLIR module containing the top-level expression to LLVM IR and add the resulting LLVM IR module to the JIT. We do this by calling `lowerToLLVM` and passing its result to `addModule`, which triggers code generation for all the functions in the module. `addModule` also accepts a `ResourceTracker` which can be used to remove the module from the JIT later. Once the module has been added to the JIT it can no longer be modified, so we also open a new module to hold subsequent code by calling `InitializeModuleAndManagers()`.
 
-Once we've added the module to the JIT we need to get a pointer to the final
-generated code. We do this by calling the JIT's `lookup` method, and passing
-the name of the top-level expression function: `__anon_expr`.
+Once we've added the module to the JIT we need to get a pointer to the final generated code. We do this by calling the JIT's `lookup` method, and passing the name of the top-level expression function: `__anon_expr`.
 
-Next, we get the in-memory address of the `__anon_expr` function. Recall
-that we compile top-level expressions into a self-contained LLVM function that
-takes no arguments and returns the computed double. Because the LLVM JIT compiler
-matches the native platform ABI, this means that you can just cast the result pointer
-to a function pointer of that type and call it directly. This means, there is no
-difference between JIT compiled code and native machine code that is statically
-linked into your application.
+Next, we get the in-memory address of the `__anon_expr` function. Recall that we compile top-level expressions into a self-contained LLVM function that takes no arguments and returns the computed double. Because the LLVM JIT compiler matches the native platform ABI, this means that you can just cast the result pointer to a function pointer of that type and call it directly. This means, there is no difference between JIT compiled code and native machine code that is statically linked into your application.
 
-Finally, since we don't support re-evaluation of top-level expressions, we
-remove the module from the JIT when we're done to free the associated memory.
-Recall, however, that the module we created a few lines earlier (via
-`InitializeModuleAndManagers`) is still open and waiting for new code to be
-added.
+Finally, since we don't support re-evaluation of top-level expressions, we remove the module from the JIT when we're done to free the associated memory. Recall, however, that the module we created a few lines earlier (via `InitializeModuleAndManagers`) is still open and waiting for new code to be added.
 
 With just these changes, let's see how Kaleidoscope works now!
 
@@ -364,8 +292,7 @@ Evaluated to 9.000000
 ```
 <!-- code-merge:end -->
 
-Well this looks like it is basically working. This demonstrates very
-basic functionality, but can we do more?
+Well this looks like it is basically working. This demonstrates very basic functionality, but can we do more?
 
 ```mlir
 ready> def testfunc(x y) x + y*2;
@@ -384,24 +311,11 @@ ready> testfunc(5, 10);
 JIT session error: Symbols not found: [ testfunc ]
 ```
 
-Function definitions and calls also work, but something went very wrong on that
-last line. The call looks valid, so what happened? As you may have guessed from
-the API a Module is a unit of allocation for the JIT, and testfunc was part
-of the same module that contained anonymous expression. When we removed that
-module from the JIT to free the memory for the anonymous expression, we deleted
-the definition of `testfunc` along with it. Then, when we tried to call
-testfunc a second time, the JIT could no longer find it.
+Function definitions and calls also work, but something went very wrong on that last line. The call looks valid, so what happened? As you may have guessed from the API a Module is a unit of allocation for the JIT, and testfunc was part of the same module that contained anonymous expression. When we removed that module from the JIT to free the memory for the anonymous expression, we deleted the definition of `testfunc` along with it. Then, when we tried to call testfunc a second time, the JIT could no longer find it.
 
-The easiest way to fix this is to put the anonymous expression in a separate
-module from the rest of the function definitions. The JIT will happily resolve
-function calls across module boundaries, as long as each of the functions called
-has a prototype, and is added to the JIT before it is called. By putting the
-anonymous expression in a different module we can delete it without affecting
-the rest of the functions.
+The easiest way to fix this is to put the anonymous expression in a separate module from the rest of the function definitions. The JIT will happily resolve function calls across module boundaries, as long as each of the functions called has a prototype, and is added to the JIT before it is called. By putting the anonymous expression in a different module we can delete it without affecting the rest of the functions.
 
-In fact, we're going to go a step further and put every function in its own
-module. Doing so allows the JIT to keep function definitions while temporary
-modules containing top-level expressions are removed:
+In fact, we're going to go a step further and put every function in its own module. Doing so allows the JIT to keep function definitions while temporary modules containing top-level expressions are removed:
 
 ```mlir
 ready> def addOne(x) x + 1;
@@ -468,16 +382,7 @@ func::FuncOp FunctionAST::codegen() {
     return {};
 ```
 
-To enable this, we'll start by adding a new global, `FunctionProtos`, that
-holds the most recent prototype for each function. We'll also add a convenience
-method, `getFunction()`, to replace calls to `TheModule->lookupSymbol<func::FuncOp>()`.
-Our convenience method searches `TheModule` for an existing function
-declaration, falling back to generating a new declaration from FunctionProtos if
-it doesn't find one. In `CallExprAST::codegen()` we just need to replace the
-call to `TheModule->lookupSymbol<func::FuncOp>()`. In `FunctionAST::codegen()` we need to
-update the FunctionProtos map first, then call `getFunction()`. With this
-done, we can always obtain a function declaration in the current module for any
-previously declared function.
+To enable this, we'll start by adding a new global, `FunctionProtos`, that holds the most recent prototype for each function. We'll also add a convenience method, `getFunction()`, to replace calls to `TheModule->lookupSymbol<func::FuncOp>()`. Our convenience method searches `TheModule` for an existing function declaration, falling back to generating a new declaration from FunctionProtos if it doesn't find one. In `CallExprAST::codegen()` we just need to replace the call to `TheModule->lookupSymbol<func::FuncOp>()`. In `FunctionAST::codegen()` we need to update the FunctionProtos map first, then call `getFunction()`. With this done, we can always obtain a function declaration in the current module for any previously declared function.
 
 We also need to update HandleDefinition and HandleExtern:
 
@@ -537,8 +442,7 @@ Evaluated to 4.000000
 
 It works!
 
-Even with this simple code, we get some surprisingly powerful capabilities -
-check this out:
+Even with this simple code, we get some surprisingly powerful capabilities - check this out:
 
 <!-- code-merge:start -->
 ```bash
@@ -561,23 +465,11 @@ Evaluated to 1.000000
 ```
 <!-- code-merge:end -->
 
-Whoa, how does the JIT know about sin and cos? The answer is surprisingly
-simple: The KaleidoscopeJIT has a straightforward symbol resolution rule that
-it uses to find symbols that aren't available in any given module: First it
-searches the definitions that have already been added to the JIT. If no
-definition is found inside the JIT, it falls back to searching the
-Kaleidoscope process itself. Since "`sin`" is available in the host process,
-the JIT resolves the call to the libm version of `sin`. The "`sin(1.0)`"
-expression above therefore executes that function at runtime.
+Whoa, how does the JIT know about sin and cos? The answer is surprisingly simple: The KaleidoscopeJIT has a straightforward symbol resolution rule that it uses to find symbols that aren't available in any given module: First it searches the definitions that have already been added to the JIT. If no definition is found inside the JIT, it falls back to searching the Kaleidoscope process itself. Since "`sin`" is available in the host process, the JIT resolves the call to the libm version of `sin`. The "`sin(1.0)`" expression above therefore executes that function at runtime.
 
-In the future we'll see how tweaking this symbol resolution rule can be used to
-enable all sorts of useful features, from security (restricting the set of
-symbols available to JIT'd code), to dynamic code generation based on symbol
-names, and even lazy compilation.
+In the future we'll see how tweaking this symbol resolution rule can be used to enable all sorts of useful features, from security (restricting the set of symbols available to JIT'd code), to dynamic code generation based on symbol names, and even lazy compilation.
 
-One immediate benefit of the symbol resolution rule is that we can now extend
-the language by writing arbitrary C++ code to implement operations. For example,
-if we add:
+One immediate benefit of the symbol resolution rule is that we can now extend the language by writing arbitrary C++ code to implement operations. For example, if we add:
 
 ```cpp
 #ifdef _WIN32
@@ -593,21 +485,11 @@ extern "C" DLLEXPORT double putchard(double X) {
 }
 ```
 
-Note, that for Windows we need to actually export the functions because
-the dynamic symbol loader will use `GetProcAddress` to find the symbols.
+Note, that for Windows we need to actually export the functions because the dynamic symbol loader will use `GetProcAddress` to find the symbols.
 
-Now we can produce simple output to the console by using things like:
-"`extern putchard(x); putchard(120);`", which prints a lowercase 'x'
-on the console (120 is the ASCII code for 'x'). Similar code could be
-used to implement file I/O, console input, and many other capabilities
-in Kaleidoscope.
+Now we can produce simple output to the console by using things like: "`extern putchard(x); putchard(120);`", which prints a lowercase 'x' on the console (120 is the ASCII code for 'x'). Similar code could be used to implement file I/O, console input, and many other capabilities in Kaleidoscope.
 
-This completes the JIT and optimizer chapter of the Kaleidoscope
-tutorial. At this point, we can compile a non-Turing-complete
-programming language, optimize and JIT compile it in a user-driven way.
-Next up we'll look into [extending the language with control flow
-constructs](chapter-05.md), tackling some interesting MLIR issues
-along the way.
+This completes the JIT and optimizer chapter of the Kaleidoscope tutorial. At this point, we can compile a non-Turing-complete programming language, optimize and JIT compile it in a user-driven way. Next up we'll look into [extending the language with control flow constructs](chapter-05.md), tackling some interesting MLIR issues along the way.
 
 ## Full Code Listing
 
@@ -616,13 +498,9 @@ We use the following `CMakeLists.txt` to build the example:
 ```cmake(../code/chapter-04/CMakeLists.txt)
 ```
 
-The `ENABLE_EXPORTS` property makes symbols in the executable available
-for runtime lookup by the JIT. CMake supplies the appropriate linker
-option for the platform, including `-rdynamic` where it is required on
-Linux.
+The `ENABLE_EXPORTS` property makes symbols in the executable available for runtime lookup by the JIT. CMake supplies the appropriate linker option for the platform, including `-rdynamic` where it is required on Linux.
 
-Once you have built MLIR, point `MLIR_DIR` at the directory containing
-`MLIRConfig.cmake`, then build and run the example:
+Once you have built MLIR, point `MLIR_DIR` at the directory containing `MLIRConfig.cmake`, then build and run the example:
 
 ```bash
 cmake -S . -B build \

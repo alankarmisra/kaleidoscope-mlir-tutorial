@@ -2,27 +2,13 @@
 
 ## Chapter 10 Introduction
 
-Welcome to Chapter 10 of the "[Implementing a language with
-MLIR](chapter-00.md)" tutorial. So far, our AST has generated operations from
-MLIR's existing dialects directly. This has served us well: `arith` represents
-arithmetic, `func` represents functions, `scf` represents structured control
-flow, and `memref` provides storage for mutable variables.
+Welcome to Chapter 10 of the "[Implementing a language with MLIR](chapter-00.md)" tutorial. So far, our AST has generated operations from MLIR's existing dialects directly. This has served us well: `arith` represents arithmetic, `func` represents functions, `scf` represents structured control flow, and `memref` provides storage for mutable variables.
 
-There are times, however, when those operations no longer describe everything
-the source language knows. In Chapter 9, lowering a variable to generic storage
-discarded its source name. We recovered that information later by walking the
-lowered IR. It worked, but it would be better not to lose the information in
-the first place.
+There are times, however, when those operations no longer describe everything the source language knows. In Chapter 9, lowering a variable to generic storage discarded its source name. We recovered that information later by walking the lowered IR. It worked, but it would be better not to lose the information in the first place.
 
-In this chapter, we'll add a deliberately small Kaleidoscope dialect containing
-only the operations needed for mutable variables. The operations preserve a
-variable's name and source location until our own lowering pass has enough
-information to create both its storage and its debug declaration.
+In this chapter, we'll add a deliberately small Kaleidoscope dialect containing only the operations needed for mutable variables. The operations preserve a variable's name and source location until our own lowering pass has enough information to create both its storage and its debug declaration.
 
-We are not moving the whole language into a custom dialect. The
-[MLIR Toy tutorial](https://mlir.llvm.org/docs/Tutorials/Toy/) demonstrates
-that larger architecture. Here we only need enough dialect to solve the
-problem in front of us.
+We are not moving the whole language into a custom dialect. The [MLIR Toy tutorial](https://mlir.llvm.org/docs/Tutorials/Toy/) demonstrates that larger architecture. Here we only need enough dialect to solve the problem in front of us.
 
 ## Why Preserve Variables?
 
@@ -34,11 +20,7 @@ def test(x)
     (y = y + 1) * y;
 ```
 
-Previously, AST generation immediately turned `x` and `y` into anonymous
-`memref` storage. MLIR retained their source locations, but it no longer knew
-that the allocations represented variables named `x` and `y`. Chapter 9 saved
-the parameter names separately and reconstructed the connection after
-lowering.
+Previously, AST generation immediately turned `x` and `y` into anonymous `memref` storage. MLIR retained their source locations, but it no longer knew that the allocations represented variables named `x` and `y`. Chapter 9 saved the parameter names separately and reconstructed the connection after lowering.
 
 Our initial MLIR will now preserve that intent directly:
 
@@ -57,14 +39,11 @@ func.func @test(%arg0: f64) -> f64 {
 }
 ```
 
-The standard dialects still handle everything they already describe well.
-Only source variables use the Kaleidoscope dialect.
+The standard dialects still handle everything they already describe well. Only source variables use the Kaleidoscope dialect.
 
 ## Defining the Dialect
 
-MLIR operations and types are commonly defined using the
-[Operation Definition Specification](https://mlir.llvm.org/docs/DefiningDialects/Operations/),
-or ODS. We begin by declaring our dialect and a base class for its operations:
+MLIR operations and types are commonly defined using the [Operation Definition Specification](https://mlir.llvm.org/docs/DefiningDialects/Operations/), or ODS. We begin by declaring our dialect and a base class for its operations:
 
 ```tablegen
 def Kaleidoscope_Dialect : Dialect {
@@ -78,8 +57,7 @@ class Kaleidoscope_Op<string mnemonic, list<Trait> traits = []>
     : Op<Kaleidoscope_Dialect, mnemonic, traits>;
 ```
 
-The dialect name provides the `kaleidoscope.` prefix in textual MLIR. We also
-define a small handle type representing a mutable source variable:
+The dialect name provides the `kaleidoscope.` prefix in textual MLIR. We also define a small handle type representing a mutable source variable:
 
 ```tablegen
 def Kaleidoscope_VariableType
@@ -90,15 +68,11 @@ def Kaleidoscope_VariableType
 }
 ```
 
-It is printed as `!kaleidoscope.var`. The type deliberately says only that the
-value is a variable. Its eventual stack representation is a lowering decision.
+It is printed as `!kaleidoscope.var`. The type deliberately says only that the value is a variable. Its eventual stack representation is a lowering decision.
 
 ## Variable Operations
 
-We need three operations. `kaleidoscope.var` declares and initializes a
-variable while preserving its source name. `argumentNumber` is zero for an
-ordinary local and one-based for a function parameter, matching DWARF's
-representation:
+We need three operations. `kaleidoscope.var` declares and initializes a variable while preserving its source name. `argumentNumber` is zero for an ordinary local and one-based for a function parameter, matching DWARF's representation:
 
 ```tablegen
 def Kaleidoscope_DeclareOp : Kaleidoscope_Op<"var", []> {
@@ -127,13 +101,9 @@ def Kaleidoscope_AssignOp : Kaleidoscope_Op<"assign", []> {
 }
 ```
 
-Notice that `kaleidoscope.read` is not marked `Pure`. Two reads of the same
-variable are not necessarily equal because an assignment may occur between
-them. Marking the operation pure would allow CSE to incorrectly reuse the
-earlier value.
+Notice that `kaleidoscope.read` is not marked `Pure`. Two reads of the same variable are not necessarily equal because an assignment may occur between them. Marking the operation pure would allow CSE to incorrectly reuse the earlier value.
 
-TableGen generates the type and operation classes. The dialect registers them
-when it is initialized:
+TableGen generates the type and operation classes. The dialect registers them when it is initialized:
 
 ```cpp
 void KaleidoscopeDialect::initialize() {
@@ -148,13 +118,11 @@ void KaleidoscopeDialect::initialize() {
 }
 ```
 
-The generated files are added to the build with `mlir_tablegen`; the complete
-commands appear in this chapter's `CMakeLists.txt`.
+The generated files are added to the build with `mlir_tablegen`; the complete commands appear in this chapter's `CMakeLists.txt`.
 
 ## Generating Variable IR
 
-Creating a source variable now creates one operation containing everything the
-lowering will need:
+Creating a source variable now creates one operation containing everything the lowering will need:
 
 ```cpp
 static Value CreateVariable(StringRef Name, Value InitialValue,
@@ -181,8 +149,7 @@ TheBuilder->create<kaleidoscope::AssignOp>(getLocation(), It->second,
 return AssignedValue;
 ```
 
-Function arguments use the same declaration operation, but include their
-one-based argument number:
+Function arguments use the same declaration operation, but include their one-based argument number:
 
 ```cpp
 unsigned Index = 0;
@@ -194,14 +161,11 @@ for (BlockArgument Argument : TheFunction.getArguments()) {
 }
 ```
 
-Local variables and loop variables use argument number zero. We no longer need
-the separate `FunctionParameters` map from Chapter 9: each declaration carries
-its own name, location, and argument number.
+Local variables and loop variables use argument number zero. We no longer need the separate `FunctionParameters` map from Chapter 9: each declaration carries its own name, location, and argument number.
 
 ## Lowering Variables and Debug Information Together
 
-Our lowering pass converts `!kaleidoscope.var` to an LLVM pointer. A declaration
-becomes an `llvm.alloca` followed by the initializing `llvm.store`:
+Our lowering pass converts `!kaleidoscope.var` to an LLVM pointer. A declaration becomes an `llvm.alloca` followed by the initializing `llvm.store`:
 
 ```cpp
 Value One = LLVM::ConstantOp::create(
@@ -211,9 +175,7 @@ Value Address = LLVM::AllocaOp::create(Rewriter, Loc, PointerType,
 LLVM::StoreOp::create(Rewriter, Loc, Adaptor.getInitialValue(), Address);
 ```
 
-At this exact point we still have the source variable operation and have just
-created its final stack address. There is nothing to rediscover. The same
-lowering creates its debug description and attaches it to that address:
+At this exact point we still have the source variable operation and have just created its final stack address. There is nothing to rediscover. The same lowering creates its debug description and attaches it to that address:
 
 ```cpp
 auto Variable = LLVM::DILocalVariableAttr::get(
@@ -235,8 +197,7 @@ Rewriter.replaceOpWithNewOp<LLVM::StoreOp>(
     Op, Adaptor.getValue(), Adaptor.getVariable());
 ```
 
-The conversion target declares our dialect illegal, ensuring that lowering
-cannot silently finish while a Kaleidoscope variable operation remains:
+The conversion target declares our dialect illegal, ensuring that lowering cannot silently finish while a Kaleidoscope variable operation remains:
 
 ```cpp
 ConversionTarget Target(Context);
@@ -253,8 +214,7 @@ if (failed(applyPartialConversion(getOperation(), Target,
 
 ## Connecting the Pass Pipeline
 
-We first lower the standard high-level dialects to the LLVM dialect. Our
-Chapter 9 debug pass then creates the compile unit and function scopes:
+We first lower the standard high-level dialects to the LLVM dialect. Our Chapter 9 debug pass then creates the compile unit and function scopes:
 
 ```cpp
 PassManager DebugPM(TheContext.get());
@@ -262,9 +222,7 @@ DebugPM.addPass(createKaleidoscopeDebugInfoPass(
     InputFilename.getValue(), OptLevel));
 ```
 
-With the function scopes available, our variable pass can create the stack
-storage and variable debug declarations together. MLIR's existing pass then
-fills in the remaining scopes on the lowered operations:
+With the function scopes available, our variable pass can create the stack storage and variable debug declarations together. MLIR's existing pass then fills in the remaining scopes on the lowered operations:
 
 ```cpp
 DebugPM.addPass(std::make_unique<LowerKaleidoscopeVariablesPass>());
@@ -283,8 +241,7 @@ store double %arg0, ptr %x, align 8
 #dbg_declare(ptr %x, !variable, !DIExpression(), !location)
 ```
 
-After this point the normal LLVM translation, JIT, object emitter, and DWARF
-generation continue unchanged.
+After this point the normal LLVM translation, JIT, object emitter, and DWARF generation continue unchanged.
 
 ## Trying It
 
@@ -321,9 +278,7 @@ func.func @test(%arg0: f64) -> f64 {
 ```
 <!-- code-merge:end -->
 
-With `--dump-llvm-ir`, the variable operations have become stack allocations,
-loads, and stores. Each allocation also has the debug declaration generated by
-our lowering pass:
+With `--dump-llvm-ir`, the variable operations have become stack allocations, loads, and stores. Each allocation also has the debug declaration generated by our lowering pass:
 
 <!-- code-merge:start -->
 ```text
@@ -352,16 +307,11 @@ define double @test(double %0) !dbg !3 {
 ```
 <!-- code-merge:end -->
 
-The first declaration describes parameter `x`; the second describes local
-variable `y`. The details omitted between the function and these metadata
-records are the compile-unit, function, type, and source-location metadata
-introduced in Chapter 9.
+The first declaration describes parameter `x`; the second describes local variable `y`. The details omitted between the function and these metadata records are the compile-unit, function, type, and source-location metadata introduced in Chapter 9.
 
 ## Testing the Dialect
 
-Dialect conversion is a particularly good place for a small regression test.
-This chapter includes a lit test that checks all three variable operations and
-then executes the result:
+Dialect conversion is a particularly good place for a small regression test. This chapter includes a lit test that checks all three variable operations and then executes the result:
 
 ```bash
 cmake --build build --target check-chapter-10
@@ -373,10 +323,8 @@ The complete implementation is split across:
 
 - `toy.cpp`, containing the compiler and variable-lowering pass;
 - `KaleidoscopeOps.td`, containing the variable type and operation definitions;
-- `KaleidoscopeDialect.h` and `KaleidoscopeDialect.cpp`, connecting the
-  generated classes to the compiler;
-- `KaleidoscopeDebugInfo.h` and `KaleidoscopeDebugInfo.cpp`, creating the
-  compile-unit and function scopes; and
+- `KaleidoscopeDialect.h` and `KaleidoscopeDialect.cpp`, connecting the generated classes to the compiler;
+- `KaleidoscopeDebugInfo.h` and `KaleidoscopeDebugInfo.cpp`, creating the compile-unit and function scopes; and
 - `CMakeLists.txt`, running TableGen and building the executable.
 
 ### Build Configuration
@@ -422,16 +370,8 @@ Use the chapter's build script as before:
 
 ## Closing Thoughts
 
-Our custom dialect is deliberately small. We introduced it because a source
-variable knows more than an anonymous allocation: it has a name, a source
-location, and perhaps an argument number. Preserving that information until
-lowering lets us generate storage and debug information together instead of
-reconstructing their relationship afterward.
+Our custom dialect is deliberately small. We introduced it because a source variable knows more than an anonymous allocation: it has a name, a source location, and perhaps an argument number. Preserving that information until lowering lets us generate storage and debug information together instead of reconstructing their relationship afterward.
 
-This is the central reason to create a dialect. It lets a compiler retain the
-concepts that matter to its source language until it is ready to express them
-in more general operations. A future chapter could take the next step and
-represent the complete Kaleidoscope AST as a dialect; the MLIR Toy tutorial
-shows what that larger design looks like.
+This is the central reason to create a dialect. It lets a compiler retain the concepts that matter to its source language until it is ready to express them in more general operations. A future chapter could take the next step and represent the complete Kaleidoscope AST as a dialect; the MLIR Toy tutorial shows what that larger design looks like.
 
 [Next: Conclusion and other useful LLVM tidbits](chapter-11.md)

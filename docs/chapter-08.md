@@ -2,35 +2,26 @@
 
 ## Chapter 8 Introduction
 
-Welcome to Chapter 8 of the "[Implementing a language with MLIR](chapter-00.md)" tutorial. This chapter describes how to compile our
-language down to object files.
+Welcome to Chapter 8 of the "[Implementing a language with MLIR](chapter-00.md)" tutorial. This chapter describes how to compile our language down to object files.
 
 ## Choosing a target
 
 Up to this point, MLIR has provided the representations and transformations used to progressively lower our source language. To produce a native object file, we now cross the boundary into LLVM’s target infrastructure. We translate our lowered MLIR module into LLVM IR, then let LLVM select the target machine and emit code for it.
 
-LLVM supports native and cross-target code generation. By default, our compiler
-targets the current machine, but object-emission mode also accepts a target
-triple through the `--target` option.
+LLVM supports native and cross-target code generation. By default, our compiler targets the current machine, but object-emission mode also accepts a target triple through the `--target` option.
 
-To specify the architecture that you want to target, we use a string
-called a "target triple". This takes the form
-`<arch><sub>-<vendor>-<sys>-<abi>` (see the [cross compilation docs](https://clang.llvm.org/docs/CrossCompilation.html#target-triple)).
+To specify the architecture that you want to target, we use a string called a "target triple". This takes the form `<arch><sub>-<vendor>-<sys>-<abi>` (see the [cross compilation docs](https://clang.llvm.org/docs/CrossCompilation.html#target-triple)).
 
-As an example, we can see what clang thinks is our current target
-triple:
+As an example, we can see what clang thinks is our current target triple:
 
 ```
 $ clang --version | grep Target
 Target: arm64-apple-darwin25.6.0
 ```
 
-Running this command may show something different on your machine as
-you might be using a different architecture or operating system to me.
+Running this command may show something different on your machine as you might be using a different architecture or operating system to me.
 
-Fortunately, we don't need to hard-code a target triple. LLVM provides
-`sys::getDefaultTargetTriple`, which returns the triple of the current machine.
-We use it when the user does not supply `--target`:
+Fortunately, we don't need to hard-code a target triple. LLVM provides `sys::getDefaultTargetTriple`, which returns the triple of the current machine. We use it when the user does not supply `--target`:
 
 ```cpp
 static llvm::cl::opt<std::string>
@@ -44,14 +35,9 @@ std::string TargetTriple =
         : llvm::Triple::normalize(TargetTripleOption);
 ```
 
-LLVM doesn't require us to link in all the target
-functionality. For example, if we're just using the JIT, we don't need
-the assembly printers. Similarly, if we're only targeting certain
-architectures, we can only link in the functionality for those
-architectures.
+LLVM doesn't require us to link in all the target functionality. For example, if we're just using the JIT, we don't need the assembly printers. Similarly, if we're only targeting certain architectures, we can only link in the functionality for those architectures.
 
-Because `--target` can select a different architecture, we initialize every
-LLVM target linked into the compiler:
+Because `--target` can select a different architecture, we initialize every LLVM target linked into the compiler:
 
 ```cpp
 llvm::InitializeAllTargetInfos();
@@ -79,14 +65,9 @@ if (!Target) {
 
 ## Target Machine
 
-We will also need a `TargetMachine`. This class provides a complete
-machine description of the machine we're targeting. If we want to
-target a specific feature (such as SSE) or a specific CPU (such as
-Intel's Sandylake), we do so now.
+We will also need a `TargetMachine`. This class provides a complete machine description of the machine we're targeting. If we want to target a specific feature (such as SSE) or a specific CPU (such as Intel's Sandylake), we do so now.
 
-To see which features and CPUs LLVM knows about for the host target built into
-our LLVM installation, we can use `llc` with the triple reported by
-`llvm-config`:
+To see which features and CPUs LLVM knows about for the host target built into our LLVM installation, we can use `llc` with the triple reported by `llvm-config`:
 
 ```bash
 $ llvm-as < /dev/null \
@@ -106,12 +87,9 @@ Available features for this target:
   ...
 ```
 
-The exact list depends on which backends were enabled when LLVM was built. You
-can check them with `llvm-config --targets-built`; this tutorial's local LLVM
-build, for example, reports only `AArch64`.
+The exact list depends on which backends were enabled when LLVM was built. You can check them with `llvm-config --targets-built`; this tutorial's local LLVM build, for example, reports only `AArch64`.
 
-For our example, we'll use the generic CPU without additional target features
-and request position-independent code:
+For our example, we'll use the generic CPU without additional target features and request position-independent code:
 
 ```cpp
 llvm::TargetOptions Options;
@@ -127,11 +105,7 @@ if (!TargetMachine) {
 
 ## Configuring the Module
 
-We're now ready to configure our module, to specify the target and
-data layout. This isn't strictly necessary, but the [frontend
-performance guide](https://llvm.org/docs/Frontend/PerformanceTips.html) recommends
-this. Optimizations benefit from knowing about the target and data
-layout.
+We're now ready to configure our module, to specify the target and data layout. This isn't strictly necessary, but the [frontend performance guide](https://llvm.org/docs/Frontend/PerformanceTips.html) recommends this. Optimizations benefit from knowing about the target and data layout.
 
 ```cpp
 auto Lowered = ExitOnErr(lowerToLLVM(TargetMachine->createDataLayout()));
@@ -140,9 +114,7 @@ Lowered.Module->setTargetTriple(llvm::Triple(TargetTriple));
 
 ## Emit Object Code
 
-We're ready to emit object code. The conventional `-o` option lets the user
-choose the output filename. When it is omitted, we replace the input file's
-extension with `.o`, so `average.ks` produces `average.o`:
+We're ready to emit object code. The conventional `-o` option lets the user choose the output filename. When it is omitted, we replace the input file's extension with `.o`, so `average.ks` produces `average.o`:
 
 ```cpp
 static llvm::cl::opt<std::string>
@@ -167,8 +139,7 @@ if (EC) {
 }
 ```
 
-Finally, we define a pass that emits object code, then we run that
-pass:
+Finally, we define a pass that emits object code, then we run that pass:
 
 ```cpp
 llvm::legacy::PassManager EmitPM;
@@ -199,9 +170,7 @@ $ cmake -S . -B build \
 $ cmake --build build
 ```
 
-With no arguments, `toy` remains the interactive JIT REPL. Object emission is
-a separate batch mode: `--emit-object` requires a source filename, reads the
-complete file, and writes an object file without displaying REPL prompts.
+With no arguments, `toy` remains the interactive JIT REPL. Object emission is a separate batch mode: `--emit-object` requires a source filename, reads the complete file, and writes an object file without displaying REPL prompts.
 
 Save a simple `average` function in `average.ks`:
 
@@ -216,8 +185,7 @@ $ ./build/toy --emit-object average.ks
 Wrote average.o
 ```
 
-We have an object file! To test it, let's write a simple program and
-link it with our output. Here's the source code:
+We have an object file! To test it, let's write a simple program and link it with our output. Here's the source code:
 
 ```cpp
 // main.cpp
@@ -232,8 +200,7 @@ int main() {
 }
 ```
 
-We link our program to `average.o` and check the result is what we
-expected:
+We link our program to `average.o` and check the result is what we expected:
 
 ```text
 $ clang++ main.cpp average.o -o main
@@ -241,8 +208,7 @@ $ ./main
 average of 3.0 and 4.0: 3.5
 ```
 
-On macOS, if `clang++` cannot find the standard library headers, run the link
-command through Xcode's toolchain wrapper instead:
+On macOS, if `clang++` cannot find the standard library headers, run the link command through Xcode's toolchain wrapper instead:
 
 ```text
 xcrun clang++ main.cpp average.o -o main
@@ -250,8 +216,7 @@ xcrun clang++ main.cpp average.o -o main
 
 ## Output Names and Cross-Compilation
 
-The default command above builds `average.o` for the current machine. Use `-o`
-when you want a different output path:
+The default command above builds `average.o` for the current machine. Use `-o` when you want a different output path:
 
 ```text
 $ ./build/toy --emit-object average.ks -o result.o
@@ -281,11 +246,7 @@ ElfHeader {
 }
 ```
 
-Here the output confirms that LLVM emitted an AArch64 ELF object rather than a
-native macOS object. Producing an object for another target does not by itself
-provide that target's linker, system libraries, or sysroot; those are still
-needed to link the object into a complete executable. The requested backend
-must also be present in the LLVM build used to compile `toy`.
+Here the output confirms that LLVM emitted an AArch64 ELF object rather than a native macOS object. Producing an object for another target does not by itself provide that target's linker, system libraries, or sysroot; those are still needed to link the object into a complete executable. The requested backend must also be present in the LLVM build used to compile `toy`.
 
 ## Full Code Listing
 
