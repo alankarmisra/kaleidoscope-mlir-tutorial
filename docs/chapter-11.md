@@ -1,14 +1,25 @@
-# 11. Kaleidoscope: Conclusion and other useful MLIR tidbits
+# Chapter 11: Conclusion and Other Useful MLIR Tidbits
 
-## Tutorial Conclusion
+## You Made It!
 
-Welcome to the final chapter of the "[Implementing a language with MLIR](chapter-00.md)" tutorial. In the course of this tutorial, we have grown our little Kaleidoscope language from being a useless toy, to being a semi-interesting (but probably still useless) toy. :)
+Welcome to the final chapter of the [Implementing a Language with MLIR](chapter-00.md) tutorial. Take a moment to appreciate what you've built. You started with a bare lexer and parser, and you've ended up with a real compiler that:
 
-It is interesting to see how far we've come, and how little code it has taken. We built the entire lexer, parser, and AST, generated MLIR through the `arith` and `func` dialects, ran real MLIR optimization passes, added an interactive run-loop backed by a genuine incremental ORC JIT, lowered progressively through the `scf` and `llvm` dialects to object files, and emitted debug information for standalone executables, all in a compact collection of source files that you can read and change.
+- Lexes, parses, and builds an AST for a working language
+- Generates MLIR through standard dialects like `arith`, `func`, and `scf`
+- Runs actual MLIR optimization passes on that IR
+- Executes code interactively through an incremental ORC JIT
+- Lowers progressively down through the `llvm` dialect to object files
+- Emits DWARF debug information for standalone executables
 
-Our little language supports a couple of interesting features: it supports user defined binary and unary operators, it uses JIT compilation for immediate evaluation, and it supports a few control flow constructs with SSA construction. Because we stayed in MLIR's dialects as long as possible, all of that is visible as readable, structured IR right up until the point it has to become machine code.
+And it's all in a compact set of source files you can read, understand, and change.
 
-Part of the idea of this tutorial was to show you how easy and fun it can be to define, build, and play with languages using MLIR. Building a compiler need not be a scary or mystical process! The compiler we built now has several distinct levels:
+Along the way, your language picked up some genuinely interesting features: user-defined binary and unary operators, JIT compilation for immediate evaluation, and control flow constructs with proper SSA construction. The reason all of that stayed readable is that we kept the program in MLIR's high-level dialects for as long as possible, only dropping to machine code at the very end.
+
+The bigger lesson here is that **building a compiler doesn't have to be scary or mystical.** MLIR gives you clear, well-defined levels to work at, and you can move between them one step at a time.
+
+## The Pipeline You Built
+
+Here's the whole journey in one picture:
 
 ```text
 Kaleidoscope source
@@ -24,48 +35,64 @@ LLVM IR
 JIT-compiled code or an object file
 ```
 
-MLIR has not replaced LLVM here. It gives the frontend useful levels of abstraction before LLVM takes over optimization, code generation, and target support.
+Notice what this picture *doesn't* say. MLIR hasn't replaced LLVM. Each level has a job. MLIR gives your frontend a clean way to express what your language means. LLVM handles optimization, code generation, and target support once you're ready to commit to real hardware.
 
-Now that you've seen some of the basics, I strongly encourage you to take the code and hack on it. For example, try adding:
+## Ideas for What to Build Next
 
-- **global variables** - While global variables have questionable value in modern software engineering, they are often useful when putting together quick little hacks like the Kaleidoscope compiler itself. Fortunately, our current setup makes it very easy to add global variables: just have value lookup check to see if an unresolved variable is in the global variable symbol table before rejecting it. MLIR's `memref` dialect gives you a ready-made way to do this: create a module-level symbol with `memref.global`, and access it from anywhere in the module with `memref.get_global`.
-- **typed variables** - Kaleidoscope currently only supports variables of type double. This gives the language a very nice elegance, because only supporting one type means that you never have to specify types. Different languages have different ways of handling this. The easiest way is to require the user to specify types for every variable definition, and record the type of the variable in the symbol table alongside its MLIR `Value`. Because MLIR's type system isn't limited to what a single dialect provides, you aren't restricted to `f64` and a handful of primitives the way you would be with a fixed instruction set - any registered dialect's types are available to you.
-- **arrays, structs, vectors, etc** - Once you add types, you can start extending the type system in all sorts of interesting ways. MLIR gives you two reasonable paths here. If you stay at the `memref`/`tensor` level, indexing is structural - `memref.load` and `memref.store` take SSA index values directly, no separate address-computation instruction required. If you'd rather work closer to the metal, once you're in the `llvm` dialect you have direct access to [llvm.getelementptr](https://mlir.llvm.org/docs/Dialects/LLVM/#llvmgetelementptr-llvmgepop), MLIR's mirror of LLVM's `getelementptr` instruction: it is so nifty/unconventional, it [has its own FAQ](https://llvm.org/docs/GetElementPtr.html)!
-- **standard runtime** - Our current language allows the user to access arbitrary external functions, and we use it for things like "printd" and "putchard". As you extend the language to add higher-level constructs, often these constructs make the most sense if they are lowered to calls into a language-supplied runtime. For example, if you add hash tables to the language, it would probably make sense to add the routines to a runtime, instead of inlining them all the way.
-- **memory management** - Currently we can only access the stack in Kaleidoscope. It would also be useful to be able to allocate heap memory, either with calls to the standard libc malloc/free interface or with a garbage collector. If you would like to use garbage collection, note that MLIR's `llvm` dialect carries the same GC support LLVM IR does: `llvm.func` accepts a `garbageCollector` attribute naming the GC strategy, which flows straight through to LLVM's [Accurate Garbage Collection](https://llvm.org/docs/GarbageCollection.html) machinery, including algorithms that move objects and need to scan/update the stack.
-- **exception handling support** - Once lowered to the `llvm` dialect, MLIR gives you the same building blocks LLVM IR does for [zero cost exceptions](https://llvm.org/docs/ExceptionHandling.html) - `llvm.invoke`, `llvm.landingpad`, and `llvm.resume` all exist as real MLIR operations that interoperate with code compiled in other languages. You could also generate code by implicitly making every function return an error value and checking it, or make explicit use of setjmp/longjmp. There are many different ways to go here.
-- **object orientation, generics, database access, complex numbers, geometric programming, ...** - Really, there is no end of crazy features that you can add to the language.
-- **unusual domains** - We've been talking about applying MLIR to a domain that many people are interested in: building a compiler for a specific language. However, MLIR's whole premise is that compiler infrastructure built for one domain should be reusable in others - the same dialect-and-progressive-lowering architecture you just used for Kaleidoscope is what powers machine learning compilers like XLA and IREE, and hardware design tools like CIRCT. Maybe you will be the first to JIT compile a regular expression interpreter into native code with MLIR?
+Now that you have a working compiler, the best thing you can do is **hack on it.** Here are some directions that our current setup makes surprisingly easy:
 
-Have fun - try doing something crazy and unusual. Building a language like everyone else always has, is much less fun than trying something a little crazy or off the wall and seeing how it turns out. If you get stuck or want to talk about it, please post on the [LLVM forums](https://discourse.llvm.org) or the [MLIR Discourse](https://discourse.llvm.org/c/mlir/31): both have lots of people who are interested in languages and are often willing to help out.
+**Global variables.** These are questionable in modern software engineering, but they're great for quick little hacks. Our value lookup already has a natural place to add them: before rejecting an unresolved variable, check a global symbol table. MLIR makes this easy with `memref.global` for the declaration and `memref.get_global` for the access.
 
-## Where to Go Next
+**Typed variables.** Kaleidoscope currently only has `double`. That's a nice simplification because you never have to write a type — but it's also limiting. The easiest extension is to require type annotations on variable definitions and store the type alongside the `Value` in your symbol table. The nice part: MLIR's type system isn't limited to a fixed set of primitives. Any registered dialect's types are available, so you're not stuck with just `f64`.
 
-If you'd rather keep going with compiler architecture, there are several natural MLIR directions from here:
+**Arrays, structs, vectors, and friends.** Once you add types, the type system opens up. MLIR gives you two paths here:
 
-- Expand the Kaleidoscope dialect beyond variables and initially represent the complete source program in language-specific MLIR. The [Toy tutorial](https://mlir.llvm.org/docs/Tutorials/Toy/) develops this design much further with tensors and shape inference.
-- Add verifiers, traits, [canonicalization patterns](https://mlir.llvm.org/docs/Canonicalization/), and [dialect interfaces](https://mlir.llvm.org/docs/Interfaces/) to the Kaleidoscope operations. These let the dialect define what valid IR means and teach generic MLIR infrastructure how its operations behave.
-- Introduce more than one lowering stage. A larger compiler does not need to jump directly from its source dialect to LLVM. It can progressively lower into whichever standard or project-specific dialects best express each intermediate form.
-- Build more [custom passes](https://mlir.llvm.org/docs/PassManagement/). Chapter 9 used one to construct debug scopes, and Chapter 10 used [dialect conversion](https://mlir.llvm.org/docs/DialectConversion/) to lower variables. The same pass infrastructure can implement language-specific analysis and optimization while the relevant semantics are still present.
-- Target something other than LLVM. Operations that remain in higher-level, target-independent dialects could instead be lowered toward GPU, SPIR-V, or another backend without changing the parser or AST.
+- Stay at the `memref`/`tensor` level, where indexing is structural — `memref.load` and `memref.store` take SSA indices directly, with no separate address computation step.
+- Drop to the `llvm` dialect, where you have direct access to [`llvm.getelementptr`](https://mlir.llvm.org/docs/Dialects/LLVM/#llvmgetelementptr-llvmgepop), MLIR's mirror of LLVM's famous `getelementptr`. It's so unconventional it [has its own FAQ](https://llvm.org/docs/GetElementPtr.html).
 
-LLVM remains the natural direction when you want to improve native code generation: inspect the translated LLVM IR, add LLVM optimization pipelines, extend the ORC JIT, support more ABI details, or integrate a runtime and system libraries. The important design decision is not whether to use MLIR *or* LLVM, but where each source-language concept should be lowered from one level to the next.
+**A standard runtime.** Right now, users can call any external function — which is how `printd` and `putchard` work. As you add higher-level features, they'll often make more sense as calls into a language runtime. Adding hash tables to the language? Those routines probably belong in a runtime library, not inlined at every call site.
 
-Before we end this tutorial, I want to talk about some "tips and tricks" for generating MLIR. These are some of the more subtle things that may not be obvious, but are very useful if you want to take advantage of MLIR's capabilities.
+**Memory management.** Today, everything lives on the stack. You'd probably want heap allocation, either through libc's `malloc`/`free` or a garbage collector. If you go the GC route, good news: MLIR's `llvm` dialect carries the same GC support LLVM IR does. The `llvm.func` operation accepts a `garbageCollector` attribute that names a GC strategy, and it flows straight into LLVM's [Accurate Garbage Collection](https://llvm.org/docs/GarbageCollection.html) machinery — including moving collectors that need to scan and update the stack.
+
+**Exception handling.** Once you're in the `llvm` dialect, MLIR gives you the same building blocks LLVM IR does for [zero-cost exceptions](https://llvm.org/docs/ExceptionHandling.html): `llvm.invoke`, `llvm.landingpad`, and `llvm.resume` are all real operations that interoperate with code compiled in other languages. You could also go simpler — every function returns an error value, or you use `setjmp`/`longjmp`. There's no single right answer.
+
+**Object orientation, generics, database access, complex numbers, geometric programming…** Really, there's no end to what you could add.
+
+**Something completely unusual.** Most of this tutorial has been about a familiar domain — building a compiler for a specific language. But MLIR's whole premise is that compiler infrastructure built for one domain should be reusable in others. The same dialect-and-progressive-lowering architecture you just used for Kaleidoscope powers machine learning compilers like XLA and IREE, and hardware design tools like CIRCT. Maybe you'll be the first to JIT-compile a regex interpreter into native code.
+
+**Go do something weird.** Building a language the way everyone else has is far less fun than trying something slightly crazy and seeing how it turns out. If you get stuck or want to talk it through, the [LLVM forums](https://discourse.llvm.org) and the [MLIR Discourse](https://discourse.llvm.org/c/mlir/31) both have plenty of people who enjoy this stuff and are happy to help.
+
+## Where to Go from Here
+
+If you'd rather keep going with compiler architecture, there are several natural directions:
+
+- **Grow the Kaleidoscope dialect.** Chapter 10 introduced it for variables only. The next step would be representing the complete source program in language-specific MLIR. The [Toy tutorial](https://mlir.llvm.org/docs/Tutorials/Toy/) develops this design much further, with tensors and shape inference.
+- **Add verifiers, traits, canonicalization patterns, and dialect interfaces.** These let your dialect define what valid IR means and teach generic MLIR infrastructure how your operations behave. See the docs on [canonicalization](https://mlir.llvm.org/docs/Canonicalization/) and [interfaces](https://mlir.llvm.org/docs/Interfaces/).
+- **Introduce more lowering stages.** A larger compiler doesn't have to jump straight from source dialect to LLVM. It can lower progressively through whichever standard or project-specific dialects express each intermediate form best.
+- **Write more custom passes.** Chapter 9 used one to construct debug scopes. Chapter 10 used [dialect conversion](https://mlir.llvm.org/docs/DialectConversion/) to lower variables. The same [pass infrastructure](https://mlir.llvm.org/docs/PassManagement/) can implement language-specific analysis and optimization while the relevant semantics are still present.
+- **Target something other than LLVM.** Operations that stay in higher-level, target-independent dialects could be lowered toward GPU, SPIR-V, or another backend without touching the parser or AST.
+
+LLVM remains the natural direction when you want better native code generation: inspect the translated LLVM IR, add LLVM optimization pipelines, extend the ORC JIT, handle more ABI details, or integrate a runtime and system libraries.
+
+The real design question isn't "MLIR or LLVM?" It's "where should each source-language concept be lowered from one level to the next?"
+
+---
+
+Before we wrap up, let's talk about some subtle but very useful properties of MLIR — things that aren't obvious at first but pay off once you know them.
 
 ## Properties of MLIR
 
-We have a couple of common questions about code in MLIR's form - let's just get these out of the way right now, shall we?
-
 ### Target Independence
 
-Kaleidoscope is an example of a "portable language": any program written in Kaleidoscope will work the same way on any target that it runs on. Many other languages have this property, e.g. lisp, java, haskell, javascript, python, etc (note that while these languages are portable, not all their libraries are).
+Kaleidoscope is a **portable language**: any program written in it behaves the same way on any target it runs on. Many other languages share this property — Lisp, Java, Haskell, JavaScript, Python — though it's worth noting that while these *languages* are portable, not all their libraries are.
 
-MLIR takes target independence further than a single-level IR like LLVM IR can. Because Kaleidoscope stayed in `arith`, `func`, and `scf` for as long as possible and only converted to the `llvm` dialect right before execution, the same high-level IR isn't committed to becoming LLVM IR at all - it could just as easily be lowered toward a completely different backend (a GPU dialect, SPIR-V, and so on) without touching the front end. You can trivially tell that the Kaleidoscope compiler generates target-independent code up through that point because it never queries for any target-specific information when generating the high-level dialects; target-specific concerns like the data layout only enter the picture in `lowerToLLVM`, right where we hand a module to the JIT.
+MLIR takes target independence further than a single-level IR like LLVM IR can. Because Kaleidoscope stays in `arith`, `func`, and `scf` for as long as possible and only converts to the `llvm` dialect right before execution, that high-level IR isn't committed to becoming LLVM IR at all. It could just as easily be lowered toward a GPU dialect, SPIR-V, or a completely different backend without touching the frontend.
 
-The fact that MLIR (like LLVM) provides a compact, target-independent representation for code gets a lot of people excited. Unfortunately, these people are usually thinking about C or a language from the C family when they are asking questions about language portability. I say "unfortunately", because there is really no way to make (fully general) C code portable, other than shipping the source code around (and of course, C source code is not actually portable in general either - ever port a really old application from 32- to 64-bits?).
+You can see this directly in the code: the compiler never queries for target-specific information while generating the high-level dialects. Target-specific concerns like data layout only enter the picture inside `lowerToLLVM`, right where the module gets handed to the JIT.
 
-The problem with C (again, in its full generality) is that it is heavily laden with target-specific assumptions. As one simple example, the preprocessor often destructively removes target-independence from the code when it processes the input text:
+Now, a lot of people get excited about this and immediately think about C. Unfortunately, they're usually thinking about C or a C-family language, and that's a problem — because there's really no way to make fully general C code portable other than shipping the source code around. And even then, C source isn't actually portable in general (ever try to port a really old application from 32-bit to 64-bit?).
+
+The issue is that C, in full generality, is heavily laden with target-specific assumptions. A simple example: the preprocessor often destroys target independence just by running:
 
 ```c
 #ifdef __i386__
@@ -75,34 +102,47 @@ The problem with C (again, in its full generality) is that it is heavily laden w
 #endif
 ```
 
-While it is possible to engineer more and more complex solutions to problems like this, it cannot be solved in full generality in a way that is better than shipping the actual source code.
+You can engineer increasingly complex solutions to problems like this, but you can't solve it in full generality in a way that beats shipping the actual source.
 
-That said, there are interesting subsets of C that can be made portable. If you are willing to fix primitive types to a fixed size (say int = 32-bits, and long = 64-bits), don't care about ABI compatibility with existing binaries, and are willing to give up some other minor features, you can have portable code. This can make sense for specialized domains such as an in-kernel language.
+That said, there are useful *subsets* of C that can be made portable. If you fix primitive types to specific sizes (say, `int` = 32 bits, `long` = 64 bits), give up ABI compatibility with existing binaries, and sacrifice a few other minor features, you can have portable code. That can make sense for specialized domains like an in-kernel language.
 
 ### Safety Guarantees
 
-Many of the languages above are also "safe" languages: it is impossible for a program written in Java to corrupt its address space and crash the process (assuming the JVM has no bugs). Safety is an interesting property that requires a combination of language design, runtime support, and often operating system support.
+Many of the languages listed above are also **safe** languages: it's impossible for a program written in Java to corrupt its address space and crash the process (assuming the JVM has no bugs). Safety is an interesting property — it needs language design, runtime support, and often operating system support all working together.
 
-Whether MLIR gives you that guarantee depends on which dialect you're in. The dialects Kaleidoscope uses through most of this tutorial - `arith`, `func`, `scf` - only let you build well-typed SSA values; there is no operation in those dialects for an unsafe pointer cast or an out-of-bounds access. That property goes away the moment you convert to the `llvm` dialect: it allows unsafe pointer casts, use after free bugs, buffer over-runs, and the same variety of problems raw LLVM IR does, because at that point it effectively *is* LLVM IR. Safety needs to be implemented as a layer on top, and, conveniently, several groups have investigated this both for LLVM and for MLIR. Ask on the [LLVM forums](https://discourse.llvm.org) if you are interested in more details.
+Whether MLIR gives you that guarantee depends on which dialect you're in. The dialects Kaleidoscope uses through most of the tutorial — `arith`, `func`, `scf` — only let you build well-typed SSA values. There's no operation in those dialects for an unsafe pointer cast or an out-of-bounds access.
+
+That property disappears the moment you convert to the `llvm` dialect. It allows unsafe pointer casts, use-after-free bugs, buffer overruns, and the same variety of problems raw LLVM IR has — because at that point, it *effectively is* LLVM IR. Safety has to be implemented as a layer on top, and several groups have investigated exactly that for both LLVM and MLIR. Ask on the [LLVM forums](https://discourse.llvm.org) if you want to dig in.
 
 ### Language-Specific Optimizations
 
-One thing about compiler infrastructure that turns off many people is that it doesn't solve all the world's problems in one system. One specific complaint people have about LLVM is that it is perceived as being incapable of performing high-level language-specific optimization: LLVM "loses too much information" once everything is lowered to a single fixed instruction set.
+One common complaint about compiler infrastructure is that it doesn't solve every problem in one system. A specific complaint people have about LLVM is that it's perceived as incapable of high-level, language-specific optimization: the story goes that LLVM "loses too much information" once everything is lowered to a single fixed instruction set.
 
-MLIR's answer to this is structurally different from LLVM's, and it's the thing this tutorial's later chapters are really about: instead of asking you to bolt language-specific passes onto a fixed IR, MLIR lets you define your own operations, types, and passes, exactly as [Chapter 10](chapter-10.md) does for Kaleidoscope's variables. A `kaleidoscope.var` operation is not merely an allocation wearing a different name. It preserves the source variable's name, location, and argument number until lowering has enough information to create both its storage and its debug declaration. You get to decide how long that information survives before you convert it away, and you can write analysis and rewrite patterns against it in the meantime.
+MLIR's answer to this is structurally different, and it's really what the later chapters of this tutorial are about: instead of bolting language-specific passes onto a fixed IR, MLIR lets you define **your own operations, types, and passes** — exactly as [Chapter 10](chapter-10.md) does for Kaleidoscope's variables.
 
-This doesn't mean MLIR is immune to the same tradeoff LLVM faces once you *do* lower: the `arith` and `llvm` dialects use structural type equivalence just like LLVM IR does, so two high-level types that happen to lower to the same `f64` or the same `!llvm.struct<(i32)>` become indistinguishable once you're there (other than debug info). The difference is that MLIR lets you choose, dialect by dialect, how much of that structure to keep before you pay that cost - and, just as with LLVM, if you have a specific need and run into a wall, the [MLIR Discourse](https://discourse.llvm.org/c/mlir/31) is a good place to ask. At the very worst, you can always treat any dialect as if it were a "dumb code generator" and implement the high-level optimizations you desire in your front-end, on the language-specific AST. More commonly, you can preserve the information in MLIR and write transformations at the level where they make sense, just as [Chapter 4](chapter-04.md) used canonicalization and CSE before lowering further.
+A `kaleidoscope.var` operation isn't just an allocation wearing a different name. It preserves the source variable's name, location, and argument number until lowering has enough information to create both its storage and its debug declaration. *You* decide how long that information survives before converting it away — and while it's there, you can write analysis and rewrite patterns against it.
+
+That said, MLIR isn't immune to the same tradeoff once you do lower. The `arith` and `llvm` dialects use structural type equivalence just like LLVM IR does, so two high-level types that both lower to `f64` or to `!llvm.struct<(i32)>` become indistinguishable once you're there (aside from debug info). The difference is that MLIR lets you choose, dialect by dialect, how much structure to keep before paying that cost. And just like with LLVM, if you hit a wall, the [MLIR Discourse](https://discourse.llvm.org/c/mlir/31) is a good place to ask.
+
+Worst case, you can always treat any dialect as a "dumb code generator" and implement the high-level optimizations you want in your frontend, on the language-specific AST. More commonly, you preserve the information in MLIR and write transformations at the level where they make sense — just as [Chapter 4](chapter-04.md) used canonicalization and CSE before lowering further.
 
 ## Tips and Tricks
 
-There is a variety of useful tips and tricks that you come to know after working on/with MLIR that aren't obvious at first glance. Instead of letting everyone rediscover them, this section talks about some of these issues.
+There are some useful techniques that aren't obvious at first glance but come up again and again once you've worked with MLIR for a while. Here are a few worth knowing.
 
-### Implementing portable offsetof/sizeof
+### Implementing Portable `offsetof`/`sizeof`
 
-One interesting thing that comes up, if you are trying to keep the code generated by your compiler "target independent", is that you often need to know the size of some type or the offset of some field in a structure. For example, you might need to pass the size of a type into a function that allocates memory.
+If you're trying to keep the code your compiler generates target-independent, you'll often need to know the size of a type or the offset of a field in a structure. For example, you might need to pass a type's size into a memory allocation function.
 
-Unfortunately, this can vary widely across targets: for example the width of a pointer is trivially target-specific. If you're already working in the `llvm` dialect, the same [clever way to use the getelementptr instruction](http://nondot.org/sabre/LLVMNotes/SizeOf-OffsetOf-VariableSizedStructs.txt) that LLVM IR uses works unchanged, since `llvm.getelementptr` is the same operation under a different syntax. But MLIR also gives you a more direct, dialect-independent answer that doesn't require the GEP trick at all: `mlir::DataLayout` exposes `getTypeSize` and `getTypeSizeInBits` for any type, resolved against whichever target data layout you're compiling for - the same data layout chapter 4's JIT already asks the `ExecutionEngine`/`KaleidoscopeJIT` for before translating to LLVM IR.
+The problem: this varies widely across targets. The width of a pointer alone is target-specific.
 
-### Garbage Collected Stack Frames
+If you're already in the `llvm` dialect, the same [clever trick using `getelementptr`](http://nondot.org/sabre/LLVMNotes/SizeOf-OffsetOf-VariableSizedStructs.txt) that works in LLVM IR works unchanged, since `llvm.getelementptr` is the same operation with different syntax.
 
-Some languages want to explicitly manage their stack frames, often so that they are garbage collected or to allow easy implementation of closures. There are often better ways to implement these features than explicit stack frames, but once you're in the `llvm` dialect, MLIR carries the same support LLVM does for this (<http://nondot.org/sabre/LLVMNotes/ExplicitlyManagedStackFrames.txt>), via the same `garbageCollector` attribute mentioned above. It requires your front-end to convert the code into [Continuation Passing Style](http://en.wikipedia.org/wiki/Continuation-passing_style) and the use of tail calls (which MLIR's `llvm` dialect also supports).
+But MLIR also gives you a more direct, dialect-independent answer that avoids the GEP trick entirely: `mlir::DataLayout` exposes `getTypeSize` and `getTypeSizeInBits` for any type, resolved against whichever target data layout you're compiling for — the same data layout Chapter 4's JIT already retrieves from the `ExecutionEngine`/`KaleidoscopeJIT` before translating to LLVM IR.
+
+### Garbage-Collected Stack Frames
+
+Some languages want to explicitly manage their stack frames, often so they can be garbage collected or to make closures easier to implement. There are usually better ways to implement these features than explicit stack frames, but if you need them, the `llvm` dialect carries the same support LLVM does — via the same `garbageCollector` attribute mentioned earlier. It requires your frontend to convert code into [Continuation Passing Style](http://en.wikipedia.org/wiki/Continuation-passing_style) and use tail calls (which the `llvm` dialect also supports).
+
+
+And that's the end of the tutorial. You've gone from a bare lexer to a full compiler with a custom dialect and real debug info. Whatever you build next, have fun with it.

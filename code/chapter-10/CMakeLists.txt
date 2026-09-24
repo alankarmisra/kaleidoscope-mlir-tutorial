@@ -22,17 +22,28 @@ include(TableGen)
 include(AddMLIR)
 include_directories(${MLIR_INCLUDE_DIRS})
 
+# Every mlir_tablegen invocation below reads this TableGen source file.
 set(LLVM_TARGET_DEFINITIONS KaleidoscopeOps.td)
+
+# Generate the KaleidoscopeDialect class declaration and definition from the
+# `def Kaleidoscope_Dialect : Dialect` record.
 mlir_tablegen(KaleidoscopeDialect.h.inc -gen-dialect-decls
   -dialect=kaleidoscope)
 mlir_tablegen(KaleidoscopeDialect.cpp.inc -gen-dialect-defs
   -dialect=kaleidoscope)
+
+# Generate C++ declarations and definitions for our TypeDef records.
 mlir_tablegen(KaleidoscopeTypes.h.inc -gen-typedef-decls
   -typedefs-dialect=kaleidoscope)
 mlir_tablegen(KaleidoscopeTypes.cpp.inc -gen-typedef-defs
   -typedefs-dialect=kaleidoscope)
+
+# Generate C++ declarations and definitions for our Op records.
 mlir_tablegen(KaleidoscopeOps.h.inc -gen-op-decls)
 mlir_tablegen(KaleidoscopeOps.cpp.inc -gen-op-defs)
+
+# Give the generated fragments one build target so the executable can depend
+# on all of them before compiling files that #include those fragments.
 add_custom_target(KaleidoscopeOpsIncGen DEPENDS
   KaleidoscopeDialect.h.inc
   KaleidoscopeDialect.cpp.inc
