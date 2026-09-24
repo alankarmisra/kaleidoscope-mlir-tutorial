@@ -25,7 +25,7 @@ representations. We do not try to duplicate that here. The hope is simply that
 after finishing this tutorial, Toy feels like the next step rather than a
 different universe.
 
-## The General Shape
+## The Pipeline
 
 The compiler eventually looks something like this:
 
