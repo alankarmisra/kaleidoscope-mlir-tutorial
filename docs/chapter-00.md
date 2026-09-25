@@ -22,3 +22,6 @@ This tutorial is structured into chapters covering individual topics, allowing y
 - [Chapter #10: Conclusion and other tidbits](chapter-10.md) - This chapter wraps up the series by discussing ways to extend the language and includes pointers to info on "special topics" like adding garbage collection support, exceptions, debugging, support for "spaghetti stacks", etc.
 
 By the end of the tutorial, we'll have built up a nice little compiler for a non-trivial language including a hand-written lexer, parser, AST, as well as code generation support - both static and JIT! The breadth of this is a great testament to the strengths of MLIR and LLVM, and shows why they provide such a powerful foundation for language designers and others who need high performance code generation.
+
+!!!note
+    This tutorial tries to honor Chris Lattner's original by staying close to its language, pace, and structure. I'm also working on a separate series for readers who prefer a slower pace, longer explanations, and more background developed along the way. It's a different format for a different learning style: the "yes, we're going to stop and explain that line too" variety. Those will take more time, partly because explaining everything requires first understanding at least some of it.

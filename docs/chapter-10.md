@@ -1,4 +1,4 @@
-# Chapter 10: Building Your Own Dialect
+# 10: Building Your Own Dialect
 
 Welcome to Chapter 10 of the "[Implementing a language with MLIR](chapter-00.md)" tutorial. So far, our AST has generated operations from MLIR's existing dialects directly. This has served us well: `arith` represents arithmetic, `func` represents functions, `scf` represents structured control flow, and `memref` provides storage for mutable variables. In this chapter, you'll create a small custom dialect called **Kaleidoscope**. We'll add a handful of operations, and they all solve one specific problem.
 

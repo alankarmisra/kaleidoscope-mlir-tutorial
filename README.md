@@ -144,3 +144,17 @@ The documentation lives in `docs/`, and the matching implementation lives in
 This follows the structure and many of the ideas of LLVM's Kaleidoscope
 tutorial, and it owes an obvious debt to the MLIR Toy tutorial too. It is an
 independent experiment, not official LLVM documentation.
+
+## License and Attribution
+
+This repository is licensed under the [Apache License v2.0 with LLVM
+Exceptions](LICENSE.TXT), the same license used by the LLVM Project and the
+original Kaleidoscope tutorial.
+
+The documentation and code in this repository are adapted from the LLVM
+Project's [My First Language Frontend with
+LLVM](https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/) tutorial and
+have been modified to teach the same language through MLIR. The original
+material is copyright the LLVM Project contributors and is used under the
+terms of that license. This repository is an independent project and is not
+official LLVM or MLIR documentation.

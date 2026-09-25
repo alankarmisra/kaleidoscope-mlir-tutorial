@@ -18,7 +18,7 @@ def fib(x)
 fib(40)
 ```
 
-We also allow Kaleidoscope to call into standard library functions - the MLIR's integration with the LLVM JIT makes this really easy. This means that you can use the 'extern' keyword to define a function before you use it (this is also useful for mutually recursive functions). For example:
+We also allow Kaleidoscope to call into standard library functions - MLIR's integration with the LLVM JIT makes this really easy. This means that you can use the 'extern' keyword to define a function before you use it (this is also useful for mutually recursive functions). For example:
 
 ```kaleidoscope
 extern sin(arg);

@@ -1,4 +1,4 @@
-# Chapter 11: Conclusion and Other Useful MLIR Tidbits
+# 11: Conclusion and Other Useful MLIR Tidbits
 
 ## You Made It!
 
