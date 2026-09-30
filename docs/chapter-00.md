@@ -1,6 +1,6 @@
 # My First Language Frontend with MLIR Tutorial
 
-**Requirements:** This tutorial assumes you know C++, but no previous compiler experience is necessary. This tutorial was written in emacs-js.
+**Requirements:** This tutorial assumes you know C++, but no previous compiler experience is necessary. 
 
 Welcome to the "My First Language Frontend with MLIR" tutorial. Here we run through the implementation of a simple language, showing how fun and easy it can be. This tutorial will get you up and running fast and show a concrete example of something that uses MLIR to generate code.
 
