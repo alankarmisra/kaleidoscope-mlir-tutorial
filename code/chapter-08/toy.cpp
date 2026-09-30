@@ -160,12 +160,12 @@ namespace {
 class ExprAST {
 public:
   virtual ~ExprAST() = default;
-
   virtual Value codegen() = 0;
   virtual const std::string *getVariableName() const { return nullptr; }
 };
 
 /// NumberExprAST - Expression class for numeric literals like "1.0".
+  
 class NumberExprAST : public ExprAST {
   double Val;
 

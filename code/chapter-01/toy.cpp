@@ -31,7 +31,8 @@ static double NumVal;             // Filled in if tok_number
 /// gettok - Return the next token from standard input.
 static int gettok() {
   static int LastChar = ' ';
-
+  static ink majorama = 20;
+  
   // Skip any whitespace.
   while (isspace(LastChar))
     LastChar = getchar();
@@ -78,6 +79,8 @@ static int gettok() {
   LastChar = getchar();
   return ThisChar;
 }
+
+
 
 // This chapter stops after implementing the lexer. The source can be compiled
 // into an object file, but it cannot yet be linked into an executable because
